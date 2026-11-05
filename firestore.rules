@@ -1,0 +1,20 @@
+rules_version = '2';
+// Reglas de seguridad para la partida ATLAS.
+// - Solo dispositivos con sesión anónima de Firebase pueden leer o escribir.
+// - No se puede listar partidas: hay que conocer el código de invitación.
+// - Nada se borra: el historial se conserva.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /partidas/{codigo} {
+      allow get, update: if request.auth != null;
+      allow create: if request.auth != null && codigo.matches('^[A-Z2-9]{4}-[A-Z2-9]{4}$');
+      allow list, delete: if false;
+
+      match /{coleccion}/{docId} {
+        allow read, create, update: if request.auth != null
+          && coleccion in ['propuestas', 'asuntos', 'votaciones', 'registro', 'informes'];
+        allow delete: if false;
+      }
+    }
+  }
+}

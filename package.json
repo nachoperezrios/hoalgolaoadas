@@ -1,0 +1,12 @@
+{
+  "name": "atlas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ATLAS: juego de estrategia ficticio para dos jugadores",
+  "scripts": {
+    "servidor": "node servidor-local.mjs",
+    "test": "node --test tests/juego.test.mjs",
+    "test:e2e": "python3 tests/e2e_dos_sesiones.py"
+  }
+}
