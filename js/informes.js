@@ -28,7 +28,7 @@ export function totalConocido(lista) {
   return { total, sinCantidad };
 }
 
-export function construirInforme({ estado, propuestas = [], registro = [], votaciones = [], desde = null }) {
+export function construirInforme({ estado, propuestas = [], registro = [], votaciones = [], personal = [], desde = null }) {
   const s = Object.fromEntries(SECCIONES.map(([id, titulo]) => [id, { id, titulo, hechos: [], enCurso: [], pendientes: [], sinDato: [] }]));
 
   // Economía
@@ -54,6 +54,12 @@ export function construirInforme({ estado, propuestas = [], registro = [], votac
   s.seguridad.hechos.push(`PFA bajo la autoridad del ${estado.pfa.autoridad}. ${estado.pfa.nota}`);
   s.seguridad.hechos.push(`Flota terrestre registrada: ${num(terrestre.total)} unidades en ${estado.pfaTerrestre.length} modelos`);
   s.seguridad.hechos.push(`Helicópteros policiales registrados: ${num(helis.total)}`);
+  for (const [inst, nombre] of [["pfa", "la PFA"], ["side", "la SIDE"], ["afi", "la AFI"]]) {
+    const ids = new Set((estado.unidades?.[inst] || []).map((u) => u.id));
+    const activos = personal.filter((d) => ids.has(d.id)).flatMap((d) => d.policias || []).filter((p) => p.estado === "Activo").length;
+    if (activos) s.seguridad.hechos.push(`Personal de ${nombre}: ${num(activos)} ${activos === 1 ? "efectivo activo" : "efectivos activos"}`);
+    else s.seguridad.sinDato.push(`Nómina del personal de ${nombre}`);
+  }
   s.seguridad.sinDato.push("Cantidad de unidades de carga de la PFA");
   const sinInspector = estado.pfa.divisiones.filter((d) => !d.inspector).map((d) => d.nombre);
   if (sinInspector.length) s.seguridad.sinDato.push(`Inspectores en jefe de: ${sinInspector.join(", ")}`);

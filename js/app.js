@@ -4,9 +4,12 @@ import { Juego, crearPartida, unirse, consultarPartida, ErrorJuego } from "./jue
 import {
   ROLES, DOMINIOS, AREAS, ESTADOS, claseEstado, ESTADOS_PROPUESTA as EP, CAMPOS_AT1, LISTAS_INVENTARIO,
   rolQueDecide, describirEfecto, resultadoVotacion, TEXTO_RESULTADO, OPCIONES_VOTO, otroRol, fechaLarga, sumarDias,
-  normalizarCodigo, UMBRAL_GUERRA,
+  normalizarCodigo, UMBRAL_GUERRA, INSTITUCIONES, nombreUnidad, instDeUnidad, requiereDecreto, dominioRequerido,
+  CAMPOS_FICHA, CAMPOS_FICHA_AT1, ETIQUETAS_RUTA, gastosFadea, IMPACTO_FILTRACION,
 } from "./reglas.js";
 import { totalConocido } from "./informes.js";
+import { ESCUDOS, imagenADataURL } from "./escudos.js";
+import { generarNombre } from "./nombres.js";
 
 const $app = document.getElementById("app");
 const $ventana = document.getElementById("ventana");
@@ -43,7 +46,7 @@ const MARCA = `<svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="3
 const app = {
   backend: null, juego: null, rol: null, vista: "despacho",
   sub: { inventario: "aereo", registro: "propuestas", asuntos: "abierto" },
-  filtros: { area: "", estado: "", propEstado: "" },
+  filtros: { area: "", estado: "", propEstado: "", pDiv: "", pRango: "", pEstado: "Activo", pTexto: "", pPagina: 0 },
   modal: null, conexion: "conectado", vistos: null, informeAbierto: null, renderPendiente: false,
 };
 
@@ -89,6 +92,7 @@ async function iniciar() {
 
 function vistaDesdeHash() {
   const h = location.hash.replace("#", "");
+  if (h === "at1") { app.sub.atlas = "at1"; return "atlas"; }
   return VISTAS[h] ? h : "despacho";
 }
 
@@ -246,8 +250,12 @@ const VISTAS = {
   situacion: ["Situación nacional", vistaSituacion],
   proyectos: ["Proyectos", vistaProyectos],
   inventarios: ["Inventarios", vistaInventarios],
-  at1: ["AT-1", vistaAT1],
-  atlas: ["ATLAS y votaciones", vistaAtlas],
+  fadea: ["FAdeA", () => vistaFadea()],
+  atlas: ["ATLAS y AT-1", vistaAtlas],
+  pfa: ["PFA", () => vistaInstitucion("pfa")],
+  side: ["SIDE", () => vistaInstitucion("side")],
+  afi: ["AFI", () => vistaInstitucion("afi")],
+  gobierno: ["Gobierno", () => vistaGobierno()],
   asuntos: ["Asuntos y reuniones", vistaAsuntos],
   registro: ["Registro de decisiones", vistaRegistro],
   informes: ["Informes", vistaInformes],
@@ -278,6 +286,7 @@ function render() {
   const otro = j.partida.jugadores?.[otroRol(app.rol)];
   const claseCon = app.conexion === "conectado" ? "" : app.conexion === "reconectando" ? "medio" : "mal";
   const textoCon = { conectado: app.backend.tipo === "firebase" ? "Sincronizado online" : "Sincronizado con el servidor local", reconectando: "Reconectando…" }[app.conexion] || "Sin conexión";
+  const foco = document.activeElement?.dataset?.foco ? { id: document.activeElement.dataset.foco, ini: document.activeElement.selectionStart } : null;
   const [, fnVista] = VISTAS[app.vista];
   let contenido;
   try { contenido = fnVista(); } catch (e) { console.error(e); contenido = `<p class="error">Error al mostrar esta vista: ${esc(e.message)}</p>`; }
@@ -304,6 +313,10 @@ function render() {
       <main class="contenido" id="contenido">${contenido}</main>
     </div>
   </div>`;
+  if (foco) {
+    const el = $app.querySelector(`[data-foco="${foco.id}"]`);
+    if (el) { el.focus(); try { el.setSelectionRange(foco.ini, foco.ini); } catch {} }
+  }
 }
 
 const encabezado = (titulo, texto = "", acciones = "") =>
@@ -370,29 +383,30 @@ function vistaSituacion() {
     <section class="panel"><h3>Política y opinión pública</h3>
       <p>Gobierno <b>${esc(e.gobierno.nombre)}</b>. Programa de reformas:</p>
       <ul class="lista-simple">${e.gobierno.reformas.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
-      <p style="margin-top:.6rem">Aprobación del gobierno: ${dato(e.gobierno.opinionPublica.aprobacion, (v) => `${esc(v)}%`)}</p>
+      <p style="margin-top:.6rem">Aprobación del gobierno: ${cargable(e.gobierno.opinionPublica.aprobacion, "gobierno.opinionPublica.aprobacion", "Aprobación del gobierno (%)", "numero", (v) => `<b>${String(v).replace(".", ",")}%</b>`)}</p>
       <div class="item-bandeja"><div><b>Federalismo</b><div class="meta">${esc(e.federalismo.propuesta)}. ${esc(e.federalismo.nota)}.</div></div>${sello(e.federalismo.estado)}</div>
     </section>
     <section class="panel"><h3>Soberanía</h3>
       ${e.soberania.map((x) => `<div class="item-bandeja"><div><b>${esc(x.tema)}</b><div class="meta">${esc(x.detalle)}</div></div>${sello(x.estado)}</div>`).join("")}
     </section>
-    <section class="panel"><h3>Seguridad <small>PFA bajo el ${esc(e.pfa.autoridad)}</small></h3>
-      <div class="tabla-envoltura"><table><thead><tr><th>División</th><th>Inspector en jefe</th></tr></thead>
-      <tbody>${e.pfa.divisiones.map((d) => `<tr><td><b>${esc(d.nombre)}</b><div class="nota">${esc(d.funcion)}</div></td><td>${dato(d.inspector)}</td></tr>`).join("")}</tbody></table></div>
-      <p class="nota" style="margin-top:.6rem">Flota terrestre: ${num(terrestre.total)} unidades. Helicópteros: ${num(helis.total)}. ${esc(e.pfa.cargas)}</p>
+    <section class="panel"><h3>Seguridad <small>PFA, SIDE y AFI bajo el ${esc(e.pfa.autoridad)}</small></h3>
+      <div class="tabla-envoltura"><table><thead><tr><th>Departamento de la PFA</th><th class="num">Activos</th></tr></thead>
+      <tbody>${(e.unidades.pfa || []).map((u) => `<tr><td>${esc(nombreUnidad(e, u.id))}</td><td class="num">${num(personalDe("pfa").filter((p) => p.division === u.id && p.estado === "Activo").length)}</td></tr>`).join("")}</tbody></table></div>
+      <p class="nota" style="margin-top:.6rem">Flota terrestre: ${num(terrestre.total)} unidades. Helicópteros: ${num(helis.total)}. SIDE: ${num(personalDe("side").filter((p) => p.estado === "Activo").length)} agentes. AFI: ${num(personalDe("afi").filter((p) => p.estado === "Activo").length)} agentes.</p>
+      <div class="acciones"><a class="btn btn-chico" href="#pfa">PFA</a><a class="btn btn-chico" href="#side">SIDE</a><a class="btn btn-chico" href="#afi">AFI</a></div>
       <p class="nota">${esc(e.federalismo.cordoba)}</p>
     </section>
     <section class="panel"><h3>Infraestructura</h3>${listaProyectos("infraestructura")}</section>
-    <section class="panel"><h3>Industria</h3><p class="nota">FAdeA produce los modelos Zonda, Bisonte, Colibrí y Dragón.</p>${listaProyectos("industria")}</section>
+    <section class="panel"><h3>Industria</h3><p class="nota">FAdeA produce los modelos Zonda, Bisonte, Colibrí y Dragón. <a href="#fadea">Administrar FAdeA</a></p>${listaProyectos("industria")}</section>
     <section class="panel"><h3>Defensa</h3>
       <p>Fuerza Aérea: <b>${num(aereo.total)}</b> aeronaves con cantidad registrada. Sin cantidad: ${esc(aereo.sinCantidad.join(", "))}.</p>
-      <p>Buques, submarinos, destructores, portaaviones, tanques y artillería: ${sinDato("cantidad no consolidada")}</p>
+      <p>Buques, submarinos, destructores, portaaviones, tanques y artillería: <a class="btn btn-chico" href="#inventarios" data-accion="subtab" data-grupo="inventario" data-valor="capacidades">Cargar cantidades</a></p>
       ${listaProyectos("defensa")}${listaProyectos("soberania")}
     </section>
     <section class="panel"><h3>ATLAS</h3>
       <p>${e.atlas.miembros.length} miembros. Sede en ${esc(e.atlas.sede)}. Presupuesto: ${esc(e.atlas.presupuestoAnual)}.</p>
       <p>Votaciones abiertas: <b>${abiertas}</b>. AT-1: ${esc(e.at1.estadoPrograma)}.</p>
-      <div class="acciones"><a class="btn btn-chico" href="#atlas">Ver ATLAS</a><a class="btn btn-chico" href="#at1">Ficha del AT-1</a></div>
+      <div class="acciones"><a class="btn btn-chico" href="#atlas">Ver ATLAS</a><a class="btn btn-chico" href="#at1">Ficha del AT-1</a><a class="btn btn-chico" href="#fadea">FAdeA</a></div>
     </section>
     <section class="panel"><h3>Relaciones exteriores</h3>
       ${e.relaciones.map((r) => `<div class="item-bandeja"><div><b>${esc(r.pais)}</b><div class="meta">${esc(r.temas)}</div></div>${sello(r.estado)}</div>`).join("")}
@@ -426,7 +440,7 @@ const ETIQUETA_REF = {
 
 function vistaInventarios() {
   const e = app.juego.estado, sub = app.sub.inventario;
-  const tabs = [["aereo", "Fuerza Aérea"], ["referencias", "Referencias aeronáuticas"], ["capacidades", "Naval y terrestre"], ["pfaTerrestre", "PFA: flota terrestre"], ["pfaHelicopteros", "PFA: helicópteros"]];
+  const tabs = [["aereo", "Fuerza Aérea"], ["referencias", "Referencias aeronáuticas"], ["capacidades", "Naval y terrestre"]];
   let cuerpo = "";
   const btnEditar = (lista, id) => `<button class="btn btn-chico" data-accion="editar-cantidad" data-lista="${lista}" data-id="${esc(id)}">Cambiar</button>`;
   if (sub === "aereo") {
@@ -457,14 +471,14 @@ function vistaInventarios() {
       <tfoot><tr><td>Total</td><td class="num">${num(t.total)}</td><td></td></tr></tfoot></table>
       <p class="nota" style="margin-top:.6rem">${sub === "pfaTerrestre" ? esc(e.pfa.cargas) : "Los UH-60 Black Hawk son militares y no se cuentan como helicópteros policiales."}</p></div>`;
   }
-  return `${encabezado("Inventarios", "Cantidades ficticias de la partida. Cada cambio pasa por el registro, con autor y valor anterior.")}
+  return `${encabezado("Inventarios", "Cantidades ficticias de la partida. Cada cambio pasa por el registro, con autor y valor anterior. La flota de la PFA está en su pestaña.")}
   <div class="subtabs" role="group" aria-label="Inventario">${tabs.map(([id, t]) => `<button data-accion="subtab" data-grupo="inventario" data-valor="${id}" aria-pressed="${sub === id}">${esc(t)}</button>`).join("")}</div>${cuerpo}`;
 }
 
-function vistaAT1() {
+function bloqueAT1() {
   const at = app.juego.estado.at1;
   const relacionadas = app.juego.propuestas.filter((p) => (p.efectos || []).some((e) => e.tipo === "at1") || /AT-1/.test(p.titulo));
-  return `${encabezado("AT-1: avión de combate conjunto de ATLAS", `Dirección: ${esc(at.direccion)}. ${sello(at.estadoPrograma === "Producción iniciada" ? "Consolidado" : at.estadoPrograma)} ${esc(at.estadoPrograma)}`)}
+  return `<p style="margin-bottom:1rem"><b>AT-1: avión de combate conjunto de ATLAS.</b> Dirección: ${esc(at.direccion)}. ${sello(at.estadoPrograma === "Producción iniciada" ? "Consolidado" : at.estadoPrograma)} ${esc(at.estadoPrograma)}</p>
   <div class="grilla">
     <section class="panel"><h3>Propósito</h3><p>${esc(at.proposito)}</p><p class="nota">Proyecto conjunto de ATLAS: no es un modelo exclusivo de FAdeA.</p>
       <h3 style="margin:.8rem 0 .4rem">Países miembros</h3><p>${esc(app.juego.estado.atlas.miembros.map((m) => m.pais).join(", "))}</p></section>
@@ -474,9 +488,9 @@ function vistaAT1() {
     <section class="panel"><h3>Plataformas de referencia</h3>
       <div class="tabla-envoltura"><table><thead><tr><th>Miembro</th><th>Plataforma</th></tr></thead><tbody>${at.plataformas.map((p) => `<tr><td>${esc(p.pais)}</td><td>${esc(p.plataforma)}</td></tr>`).join("")}</tbody></table></div>
       <p class="nota" style="margin-top:.6rem">${esc(at.aclaracion)}</p></section>
-    <section class="panel"><h3>Datos técnicos no definidos</h3>
-      <ul class="lista-simple">${at.noDefinidos.map((x) => `<li>${esc(x)}: ${sinDato("No definido")}</li>`).join("")}</ul>
-      <p class="nota" style="margin-top:.6rem">La aplicación no completa estos datos por su cuenta.</p></section>
+    <section class="panel"><h3>Ficha técnica</h3>
+      ${fichaTecnica("at1", CAMPOS_FICHA_AT1, "at1.ficha")}
+      <p class="nota" style="margin-top:.6rem">La completan los jugadores con decisiones de ATLAS; la aplicación no agrega datos por su cuenta.</p></section>
     <section class="panel"><h3>Decisiones registradas sobre el AT-1</h3>
       ${relacionadas.length ? relacionadas.map((p) => filaPropuesta(p)).join("") : `<p class="vacio">Todavía no hay decisiones nuevas sobre el programa.</p>`}</section>
   </div>`;
@@ -485,7 +499,11 @@ function vistaAT1() {
 function vistaAtlas() {
   const at = app.juego.estado.atlas;
   const vots = app.juego.votaciones;
-  return `${encabezado("ATLAS", `Sede central en ${esc(at.sede)}. Presupuesto: ${esc(at.presupuestoAnual)}.`, `<button class="btn btn-primario" data-accion="nueva-votacion">Abrir votación</button>`)}
+  const tabs = [["miembros", "Miembros y votaciones"], ["at1", "AT-1"]];
+  const sub = subActual("atlas", tabs);
+  const cabecera = `${encabezado("ATLAS", `Sede central en ${esc(at.sede)}. Presupuesto: ${esc(at.presupuestoAnual)}.`, `<button class="btn btn-primario" data-accion="nueva-votacion">Abrir votación</button>`)}${subtabs("atlas", tabs)}`;
+  if (sub === "at1") return cabecera + bloqueAT1();
+  return `${cabecera}
   <section class="panel"><h3>Votaciones</h3>
     ${vots.length ? `<div class="tabla-envoltura"><table><thead><tr><th>Asunto</th><th>Tipo</th><th class="num">A favor</th><th>Resultado</th><th>Estado</th></tr></thead><tbody>
     ${vots.map((v) => { const r = resultadoVotacion(v); return `<tr class="clic" data-accion="ver-votacion" data-id="${esc(v.id)}" tabindex="0"><td><b>${esc(v.titulo)}</b><div class="nota">${esc(fechaLarga(v.fechaJuego))}</div></td><td>${v.tipo === "guerra" ? "Decisión de guerra" : "General"}</td><td class="num">${r.si} de ${r.n} (${pct(r.porcentaje)})</td><td><span class="resultado ${r.resultado}">${esc(TEXTO_RESULTADO[r.resultado].split(":")[0])}</span></td><td>${v.estado === "abierta" ? sello("Pendiente") : sello("Consolidado")}</td></tr>`; }).join("")}
@@ -500,6 +518,598 @@ function vistaAtlas() {
       ${at.enConversaciones.length ? at.enConversaciones.map((x) => `<div class="item-bandeja"><div><b>${esc(x.pais)}</b><div class="meta">${esc(x.nota)}</div></div><button class="btn btn-chico" data-accion="nueva-propuesta" data-dominio="atlas" data-efecto="atlas_alta" data-pais="${esc(x.pais)}">Proponer incorporación</button></div>`).join("") : `<p class="vacio">Ningún país en conversaciones.</p>`}
     </section>
   </div>`;
+}
+
+// ---------- formularios genéricos ----------
+// Cualquier dato, lista o expediente se carga con el mismo mecanismo: arma una
+// propuesta, muestra en vivo quién decide y respeta el reparto de autoridad.
+const IMPACTOS = [["0", "Sin impacto"], ["5", "+5 puntos"], ["3", "+3 puntos"], ["1", "+1 punto"], ["-1", "−1 punto"], ["-3", "−3 puntos"], ["-5", "−5 puntos"]];
+const nuevoId = (prefijo) => `${prefijo}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+const obtener = (obj, ruta) => ruta.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+const listaOpciones = (ops) => (typeof ops === "function" ? ops() : ops || []).map((o) => (Array.isArray(o) ? o : [o, o]));
+
+function campoHTML(c, valor) {
+  const v = valor ?? "";
+  const req = c.req ? " required" : "";
+  const ayuda = c.ayuda ? ` <small>${esc(c.ayuda)}</small>` : "";
+  let control;
+  if (c.tipo === "select") control = `<select name="${c.k}"${req}>${c.req ? "" : `<option value="">Sin cargar</option>`}${opciones(listaOpciones(c.opciones), v)}</select>`;
+  else if (c.tipo === "area") control = `<textarea name="${c.k}"${req}>${esc(v)}</textarea>`;
+  else if (c.tipo === "numero") control = `<input type="text" inputmode="decimal" name="${c.k}" value="${esc(typeof v === "number" ? String(v).replace(".", ",") : v)}"${req}>`;
+  else control = `<input type="text" name="${c.k}" value="${esc(v)}" maxlength="${c.max || 300}"${req}>`;
+  if (c.generar) control = `<span class="acciones" style="flex-wrap:nowrap">${control}<button class="btn btn-chico" type="button" data-accion="generar-nombre" data-campo="${c.k}">Generar nombre</button></span>`;
+  return `<label class="campo">${esc(c.l)}${ayuda}${control}</label>`;
+}
+
+function leerCampo(c, fd) {
+  const t = String(fd.get(c.k) ?? "").trim();
+  if (c.req && !t) throw new ErrorJuego(`Falta completar: ${c.l}`);
+  if (c.tipo === "numero") {
+    if (!t) return null;
+    const n = parsearNumero(t);
+    if (Number.isNaN(n)) throw new ErrorJuego(`${c.l}: tiene que ser un número`);
+    return n;
+  }
+  return t;
+}
+const valoresDe = (campos, fd) => Object.fromEntries(campos.map((c) => [c.k, leerCampo(c, fd)]));
+const distinto = (a, b) => JSON.stringify(a ?? "") !== JSON.stringify(b ?? "");
+
+function construirConImpacto(fd) {
+  const r = app.formActual.construir(fd);
+  const imp = Number(fd.get("impacto") || 0);
+  if (imp) r.efectos = [...r.efectos, { tipo: "opinion", delta: imp, motivo: r.titulo }];
+  r.dominio ||= dominioRequerido(r.efectos[0], app.juego.estado) || "politica";
+  return r;
+}
+
+function abrirFormulario({ titulo, subtitulo = "", campos, valores = {}, construir, textoBoton, conImpacto = true, extraHTML = "" }) {
+  app.formActual = { construir };
+  abrirVentana({ titulo, subtitulo, estatico: `<form data-form="generico">
+    <div class="fila-campos">${campos.filter((c) => c.tipo !== "area").map((c) => campoHTML(c, valores[c.k])).join("")}</div>
+    ${campos.filter((c) => c.tipo === "area").map((c) => campoHTML(c, valores[c.k])).join("")}
+    ${extraHTML}
+    <label class="campo">Justificación <small>Opcional</small><textarea name="justificacion" style="min-height:3.5em"></textarea></label>
+    ${conImpacto ? `<label class="campo">Impacto en la opinión pública <small>Lo ve quien decide; se aplica si se aprueba</small><select name="impacto">${opciones(IMPACTOS, "0")}</select></label>` : ""}
+    <div class="aviso-decide" data-aviso-generico></div>
+    <button class="btn btn-primario" type="submit">${esc(textoBoton || "Registrar")}</button></form>` });
+  const form = $ventana.querySelector('[data-form="generico"]');
+  const actualizar = () => {
+    const caja = form.querySelector("[data-aviso-generico]");
+    try {
+      const { dominio, efectos } = construirConImpacto(new FormData(form));
+      const decide = rolQueDecide(dominio, efectos, app.juego.estado);
+      const decreto = efectos.some((e) => dominioRequerido(e, app.juego.estado) === "decretos");
+      caja.textContent = decide === app.rol
+        ? "Está dentro de tus facultades: se aplica al registrarlo y el otro cargo lo ve al instante."
+        : `${decreto ? "Requiere decreto presidencial. " : ""}Le corresponde al ${nombreRol(decide)}: le llega como pedido y se aplica si lo aprueba.`;
+    } catch (e) { caja.textContent = e.message; }
+  };
+  form.addEventListener("input", actualizar);
+  form.addEventListener("change", actualizar);
+  actualizar();
+}
+
+// Un valor que se puede cargar o editar desde donde se muestra.
+function cargable(valor, ruta, titulo, tipo = "texto", formato = esc) {
+  const btn = (t) => `<button class="btn btn-chico" data-accion="dato" data-ruta="${esc(ruta)}" data-titulo="${esc(titulo)}" data-tipo="${tipo}">${t}</button>`;
+  return vacio(valor) ? btn("Cargar") : `${formato(valor)} ${btn("Editar")}`;
+}
+
+function abrirDato(ruta, titulo, tipo = "texto") {
+  const actual = obtener(app.juego.estado, ruta);
+  abrirFormulario({
+    titulo, campos: [{ k: "valor", l: titulo, tipo: tipo === "numero" ? "numero" : tipo === "area" ? "area" : "texto" }], valores: { valor: actual },
+    construir: (fd) => {
+      let v = leerCampo({ k: "valor", l: titulo, tipo }, fd);
+      if (v === "") v = null;
+      if (!distinto(v, actual)) throw new ErrorJuego("Escribí un valor distinto al actual");
+      return { titulo: ETIQUETAS_RUTA(ruta, app.juego.estado), efectos: [{ tipo: "dato", ruta, valor: v }] };
+    },
+  });
+}
+
+// ---------- esquemas de listas (estado general) ----------
+const ESTADOS_PLANTA = ["Operativa", "En construcción", "En ampliación", "En mantenimiento", "Inactiva"];
+const ESTADOS_MODELO = ["Concepto", "En desarrollo", "Prototipo", "En pruebas", "En producción", "Retirado"];
+const ESQUEMAS = {
+  planta: { ruta: "fadea.plantas", nombre: "Planta de FAdeA", nuevo: "Nueva planta o instalación", prefijo: "pla", campos: [
+    { k: "nombre", l: "Nombre", req: true }, { k: "ubicacion", l: "Ubicación" }, { k: "estado", l: "Estado", tipo: "select", opciones: ESTADOS_PLANTA },
+    { k: "capacidad", l: "Capacidad" }, { k: "funcion", l: "Función", tipo: "area" }] },
+  modelo: { ruta: "fadea.modelos", nombre: "Modelo de FAdeA", nuevo: "Nuevo modelo (requiere autorización presidencial)", prefijo: "mod", campos: [
+    { k: "nombre", l: "Designación y nombre", req: true, ayuda: "Ej.: AR-99 Pampero" }, { k: "rol", l: "Rol" },
+    { k: "estado", l: "Estado del programa", tipo: "select", opciones: ESTADOS_MODELO }, { k: "exclusivo", l: "Uso exclusivo argentino", tipo: "select", opciones: ["Sí", "No"] },
+    { k: "notas", l: "Notas", tipo: "area" }] },
+  movimiento: { ruta: "fadea.movimientos", nombre: "Finanzas de FAdeA", nuevo: "Registrar movimiento", prefijo: "mov", campos: [
+    { k: "concepto", l: "Concepto", req: true }, { k: "tipo", l: "Tipo", tipo: "select", opciones: ["Gasto", "Ingreso"], req: true },
+    { k: "monto", l: "Monto (US$ millones)", tipo: "numero", req: true }, { k: "estado", l: "Estado", tipo: "select", opciones: ["Registrado", "Anulado"], req: true },
+    { k: "notas", l: "Notas", tipo: "area" }] },
+  gabinete: { ruta: "gabinete", nombre: "Gabinete", nuevo: "Nuevo cargo de gabinete", prefijo: "gab", campos: [
+    { k: "cargo", l: "Cargo", req: true }, { k: "titular", l: "Titular", generar: true },
+    { k: "estado", l: "Estado", tipo: "select", opciones: ["En funciones", "Interino", "Vacante", "Renunció", "Removido"] }, { k: "notas", l: "Notas", tipo: "area" }] },
+  provincia: { ruta: "provincias", nombre: "Provincias", nuevo: "Nueva jurisdicción", prefijo: "prov", campos: [
+    { k: "nombre", l: "Jurisdicción", req: true }, { k: "gobernador", l: "Gobernador o gobernadora", generar: true },
+    { k: "alineamiento", l: "Relación con el Gobierno", tipo: "select", opciones: ["Aliado", "Neutral", "Opositor"] },
+    { k: "acuerdos", l: "Acuerdos con la Nación", tipo: "area" }, { k: "notas", l: "Notas", tipo: "area" }] },
+  relacion: { ruta: "relaciones", nombre: "Relaciones exteriores", nuevo: "Nueva relación bilateral", prefijo: "rel", campos: [
+    { k: "pais", l: "País", req: true }, { k: "estado", l: "Estado", tipo: "select", opciones: ["En negociación", "Cooperación activa", "Aliado estratégico", "Tensa", "Congelada"] },
+    { k: "temas", l: "Temas", tipo: "area" }] },
+  tratado: { ruta: "tratados", nombre: "Tratados", nuevo: "Nuevo tratado o acuerdo", prefijo: "tra", campos: [
+    { k: "nombre", l: "Nombre", req: true }, { k: "partes", l: "Partes" },
+    { k: "tipo", l: "Tipo", tipo: "select", opciones: ["Comercial", "Cooperación", "Defensa", "Tecnológico", "Energía", "Otro"] },
+    { k: "estado", l: "Estado", tipo: "select", opciones: ["En negociación", "Firmado", "Ratificado por el Congreso", "Suspendido", "Denunciado"] },
+    { k: "notas", l: "Notas", tipo: "area" }] },
+  bloqueDiputados: { ruta: "congreso.bloquesDiputados", nombre: "Bloques de Diputados", nuevo: "Nuevo bloque en Diputados", prefijo: "bdi", campos: [
+    { k: "nombre", l: "Bloque", req: true }, { k: "bancas", l: "Bancas", tipo: "numero", req: true },
+    { k: "postura", l: "Postura", tipo: "select", opciones: ["Oficialista", "Aliado", "Independiente", "Opositor"] }] },
+  bloqueSenado: { ruta: "congreso.bloquesSenado", nombre: "Bloques del Senado", nuevo: "Nuevo bloque en el Senado", prefijo: "bse", campos: [
+    { k: "nombre", l: "Bloque", req: true }, { k: "bancas", l: "Bancas", tipo: "numero", req: true },
+    { k: "postura", l: "Postura", tipo: "select", opciones: ["Oficialista", "Aliado", "Independiente", "Opositor"] }] },
+};
+for (const inst of ["pfa", "side", "afi"]) {
+  ESQUEMAS[`unidad-${inst}`] = { ruta: `unidades.${inst}`, nombre: `Departamentos de ${INSTITUCIONES[inst].corto}`, nuevo: "Nuevo departamento", prefijo: inst, campos: [
+    { k: "nombre", l: "Nombre del departamento", req: true }, ...(inst === "pfa" ? [{ k: "numero", l: "Número", tipo: "numero" }] : [])] };
+}
+
+function abrirItem(esq, id = null, iniciales = {}) {
+  const E = ESQUEMAS[esq];
+  const lista = obtener(app.juego.estado, E.ruta) || [];
+  const actual = id ? lista.find((x) => x.id === id) : null;
+  const clave = E.campos[0].k;
+  abrirFormulario({
+    titulo: actual ? `${actual[clave]}` : E.nuevo, subtitulo: esc(E.nombre), campos: E.campos, valores: actual || iniciales,
+    textoBoton: actual ? "Guardar cambios" : "Registrar",
+    construir: (fd) => {
+      const v = valoresDe(E.campos, fd);
+      if (actual) {
+        const cambios = Object.fromEntries(Object.entries(v).filter(([k, x]) => distinto(x, actual[k])));
+        if (!Object.keys(cambios).length) throw new ErrorJuego("No cambiaste ningún dato");
+        return { titulo: `${E.nombre}: ${actual[clave]}`, efectos: [{ tipo: "lista", ruta: E.ruta, op: "editar", id, nombre: actual[clave], cambios }] };
+      }
+      const nid = esq.startsWith("unidad-") ? `${E.prefijo}-${normalizar(v.nombre).slice(0, 24) || "dpto"}-${Date.now().toString(36).slice(-4)}` : nuevoId(E.prefijo);
+      return { titulo: `${E.nombre}: alta de ${v[clave]}`, efectos: [{ tipo: "lista", ruta: E.ruta, op: "agregar", item: { id: nid, ...v } }] };
+    },
+  });
+}
+
+// ---------- esquemas de documentos (colecciones) ----------
+const CLASIFICACIONES = ["Reservado", "Confidencial", "Secreto", "Estrictamente secreto"];
+const unidadesDe = (inst) => (app.juego.estado.unidades[inst] || []).map((u) => [u.id, u.numero ? `Dpto ${u.numero}: ${u.nombre}` : u.nombre]);
+const votos = (pref) => [["Af", "afirmativos"], ["Ne", "negativos"], ["Ab", "abstenciones"]].map(([s, n]) => ({ k: `${pref}${s}`, l: `${pref === "dip" ? "Diputados" : "Senado"}: ${n}`, tipo: "numero", campoVoto: n }));
+const ESQ_DOCS = {
+  orden: {
+    col: "ordenes", nombre: "Orden de producción", prefijo: "ord", dominio: "fadea",
+    campos: () => [
+      { k: "modelo", l: "Modelo", tipo: "select", req: true, opciones: () => app.juego.estado.fadea.modelos.map((m) => [m.id, m.nombre]) },
+      { k: "cantidad", l: "Cantidad ordenada", tipo: "numero", req: true }, { k: "entregadas", l: "Entregadas", tipo: "numero" },
+      { k: "planta", l: "Planta", tipo: "select", opciones: () => app.juego.estado.fadea.plantas.map((p) => [p.id, p.nombre]) },
+      { k: "estado", l: "Estado", tipo: "select", req: true, opciones: ["Autorizada", "En producción", "Entregada", "Suspendida"] },
+      { k: "fechaEstimada", l: "Entrega estimada" }, { k: "notas", l: "Notas", tipo: "area" }],
+    inicial: () => ({ estado: "Autorizada", entregadas: 0 }),
+    aDatos: (v) => {
+      if (!Number.isInteger(v.cantidad) || v.cantidad <= 0) throw new ErrorJuego("La cantidad tiene que ser un entero positivo");
+      const entregadas = v.entregadas || 0;
+      let estado = v.estado;
+      if (entregadas >= v.cantidad) estado = "Entregada";
+      else if (entregadas > 0 && estado === "Autorizada") estado = "En producción";
+      return { ...v, estado, entregadas, titulo: `${app.juego.estado.fadea.modelos.find((m) => m.id === v.modelo)?.nombre || v.modelo} × ${v.cantidad}` };
+    },
+  },
+  filtracion: {
+    col: "filtraciones", nombre: "Filtración de datos", prefijo: "fil", dominio: "fadea",
+    campos: () => [
+      { k: "titulo", l: "Título", req: true }, { k: "gravedad", l: "Gravedad", tipo: "select", req: true, opciones: Object.keys(IMPACTO_FILTRACION) },
+      { k: "estado", l: "Estado", tipo: "select", req: true, opciones: ["Detectada", "En investigación", "Contenida", "Cerrada"] },
+      { k: "origen", l: "Origen sospechado" }, { k: "trascendio", l: "¿Trascendió públicamente?", tipo: "select", req: true, opciones: ["No", "Sí"] },
+      { k: "informacion", l: "Información comprometida", tipo: "area" }, { k: "medidas", l: "Medidas tomadas", tipo: "area" }],
+    inicial: () => ({ estado: "Detectada", trascendio: "No", gravedad: "Media" }),
+    // Si trasciende, la opinión pública reacciona según la gravedad.
+    extra: (d, actual) => (d.trascendio === "Sí" && actual?.trascendio !== "Sí" ? [{ tipo: "opinion", delta: IMPACTO_FILTRACION[d.gravedad] || -3, motivo: `Filtración: ${d.titulo}` }] : []),
+  },
+  expediente: {
+    col: "inteligencia", nombre: "Expediente clasificado", prefijo: "exp",
+    campos: (inst) => [
+      { k: "titulo", l: "Carátula", req: true }, { k: "clasificacion", l: "Clasificación", tipo: "select", req: true, opciones: CLASIFICACIONES },
+      { k: "estado", l: "Estado", tipo: "select", req: true, opciones: ["Abierto", "En análisis", "Elevado", "Cerrado", "Archivado"] },
+      { k: "unidad", l: "Departamento a cargo", tipo: "select", opciones: () => unidadesDe(inst) }, { k: "responsable", l: "Responsable" },
+      { k: "resumen", l: "Resumen", tipo: "area" }, { k: "notas", l: "Notas", tipo: "area" }],
+    inicial: () => ({ estado: "Abierto", clasificacion: "Confidencial" }),
+  },
+  mision: {
+    col: "inteligencia", nombre: "Misión", prefijo: "mis",
+    campos: (inst) => [
+      { k: "titulo", l: "Nombre en clave", req: true }, { k: "estado", l: "Estado", tipo: "select", req: true, opciones: ["Planificada", "En curso", "Suspendida", "Completada", "Fallida"] },
+      { k: "riesgo", l: "Riesgo", tipo: "select", opciones: ["Bajo", "Medio", "Alto"] }, { k: "clasificacion", l: "Clasificación", tipo: "select", opciones: CLASIFICACIONES },
+      { k: "unidad", l: "Departamento a cargo", tipo: "select", opciones: () => unidadesDe(inst) }, { k: "responsable", l: "Responsable" },
+      { k: "objetivo", l: "Objetivo", tipo: "area" }, { k: "agentes", l: "Agentes asignados", tipo: "area" }, { k: "notas", l: "Notas", tipo: "area" }],
+    inicial: () => ({ estado: "Planificada", riesgo: "Medio", clasificacion: "Secreto" }),
+  },
+  ley: {
+    col: "leyes", nombre: "Proyecto de ley", prefijo: "ley", dominio: "politica",
+    campos: () => [
+      { k: "titulo", l: "Título", req: true }, { k: "origen", l: "Origen", tipo: "select", opciones: ["Poder Ejecutivo", "Cámara de Diputados", "Senado"] },
+      { k: "estado", l: "Estado", tipo: "select", req: true, opciones: ["Presentado", "En comisión", "Media sanción", "Sancionada", "Rechazada", "Vetada", "Promulgada"] },
+      ...votos("dip"), ...votos("sen"), { k: "descripcion", l: "Descripción", tipo: "area" }, { k: "notas", l: "Notas", tipo: "area" }],
+    inicial: () => ({ estado: "Presentado", origen: "Poder Ejecutivo" }),
+    aValores: (l) => ({ ...l, dipAf: l.votosDiputados?.afirmativos, dipNe: l.votosDiputados?.negativos, dipAb: l.votosDiputados?.abstenciones,
+      senAf: l.votosSenado?.afirmativos, senNe: l.votosSenado?.negativos, senAb: l.votosSenado?.abstenciones }),
+    aDatos: (v) => {
+      const { dipAf, dipNe, dipAb, senAf, senNe, senAb, ...resto } = v;
+      return { ...resto, votosDiputados: { afirmativos: dipAf, negativos: dipNe, abstenciones: dipAb }, votosSenado: { afirmativos: senAf, negativos: senNe, abstenciones: senAb } };
+    },
+  },
+};
+
+function abrirDoc(esq, id = null, inst = null) {
+  const E = ESQ_DOCS[esq];
+  const actual = id ? app.juego[E.col].find((x) => x.id === id) : null;
+  inst = inst || actual?.inst || null;
+  const campos = E.campos(inst);
+  const valores = actual ? (E.aValores ? E.aValores(actual) : actual) : (E.inicial ? E.inicial() : {});
+  const dominio = E.dominio || inst;
+  abrirFormulario({
+    titulo: actual ? actual.titulo : `Nuevo: ${E.nombre.toLowerCase()}`, subtitulo: esc(inst ? `${E.nombre} · ${INSTITUCIONES[inst].corto}` : E.nombre),
+    campos, valores, textoBoton: actual ? "Guardar cambios" : "Registrar",
+    construir: (fd) => {
+      const v = valoresDe(campos, fd);
+      const datos = E.aDatos ? E.aDatos(v) : v;
+      const extra = E.extra ? E.extra(datos, actual) : [];
+      if (actual) {
+        const cambios = Object.fromEntries(Object.entries(datos).filter(([k, x]) => distinto(x, actual[k])));
+        if (!Object.keys(cambios).length) throw new ErrorJuego("No cambiaste ningún dato");
+        return { titulo: `${E.nombre}: ${actual.titulo}`, dominio, efectos: [{ tipo: "doc", col: E.col, id, op: "editar", inst, titulo: actual.titulo, cambios }, ...extra] };
+      }
+      const fijos = E.col === "inteligencia" ? { inst, tipo: esq } : {};
+      return { titulo: `${E.nombre}: ${datos.titulo}`, dominio, efectos: [{ tipo: "doc", col: E.col, id: nuevoId(E.prefijo), op: "crear", inst, titulo: datos.titulo, datos: { ...datos, ...fijos } }, ...extra] };
+    },
+  });
+}
+
+function tablaDocs(items, columnas, esq, inst = null, vacioTexto = "No hay registros.") {
+  if (!items.length) return `<p class="vacio">${esc(vacioTexto)}</p>`;
+  return `<div class="tabla-envoltura"><table><thead><tr>${columnas.map(([, t]) => `<th>${esc(t)}</th>`).join("")}</tr></thead><tbody>
+    ${items.map((d) => `<tr class="clic" data-accion="doc" data-esq="${esq}" data-id="${esc(d.id)}"${inst ? ` data-inst="${inst}"` : ""} tabindex="0">${columnas.map(([k], i) => {
+      const v = typeof k === "function" ? k(d) : esc(d[k] ?? "");
+      return `<td>${i === 0 ? `<b>${v}</b>` : v || `<span class="nota">—</span>`}</td>`;
+    }).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function tablaItems(items, columnas, esq) {
+  if (!items.length) return `<p class="vacio">Todavía no hay registros.</p>`;
+  return `<div class="tabla-envoltura"><table><thead><tr>${columnas.map(([, t]) => `<th>${esc(t)}</th>`).join("")}<th></th></tr></thead><tbody>
+    ${items.map((d) => `<tr>${columnas.map(([k], i) => {
+      const v = typeof k === "function" ? k(d) : esc(d[k] ?? "");
+      return `<td>${i === 0 ? `<b>${v}</b>` : v || `<button class="btn btn-chico" data-accion="item" data-esq="${esq}" data-id="${esc(d.id)}">Cargar</button>`}</td>`;
+    }).join("")}<td><button class="btn btn-chico" data-accion="item" data-esq="${esq}" data-id="${esc(d.id)}">Editar</button></td></tr>`).join("")}</tbody></table></div>`;
+}
+
+const subtabs = (grupo, tabs) => {
+  const actual = app.sub[grupo] || tabs[0][0];
+  return `<div class="subtabs" role="group">${tabs.map(([id, t]) => `<button data-accion="subtab" data-grupo="${grupo}" data-valor="${id}" aria-pressed="${actual === id}">${esc(t)}</button>`).join("")}</div>`;
+};
+const subActual = (grupo, tabs) => (tabs.some(([id]) => id === app.sub[grupo]) ? app.sub[grupo] : tabs[0][0]);
+
+// ---------- personal (PFA, SIDE, AFI) ----------
+const ordenRango = (inst) => Object.fromEntries(INSTITUCIONES[inst].rangos.map((r, i) => [r, i]));
+const normalizar = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+const selectRango = (inst, sel, nombre = "rango") => `<select name="${nombre}">${Object.entries(INSTITUCIONES[inst].grupos).map(([g, rs]) => `<optgroup label="${esc(g)}">${opciones(rs.map((r) => [r, r]), sel)}</optgroup>`).join("")}</select>`;
+const POR_PAGINA = 50;
+const CANTIDAD_SUGERIDA = { pfa: 500, side: 400, afi: 800 };
+
+function filtrosDe(inst) {
+  app.filtrosInst ||= {};
+  return (app.filtrosInst[inst] ||= { pDiv: "", pRango: "", pEstado: "Activo", pTexto: "", pPagina: 0 });
+}
+function personalDe(inst) {
+  const ids = new Set((app.juego.estado.unidades[inst] || []).map((u) => u.id));
+  return app.juego.personal.filter((d) => ids.has(d.id)).flatMap((d) => (d.policias || []).map((p) => ({ ...p, division: d.id })));
+}
+const esJefe = (p) => /^jefe de departamento/i.test(p.funcion || "");
+
+function vistaPersonal(inst) {
+  const f = filtrosDe(inst);
+  const orden = ordenRango(inst);
+  const todos = personalDe(inst);
+  const activos = todos.filter((p) => p.estado === "Activo");
+  const texto = normalizar(f.pTexto);
+  const lista = todos
+    .filter((p) => (!f.pDiv || p.division === f.pDiv) && (!f.pRango || p.rango === f.pRango) && (!f.pEstado || p.estado === f.pEstado)
+      && (!texto || normalizar(p.nombre).includes(texto) || normalizar(p.funcion).includes(texto)))
+    .sort((a, b) => orden[b.rango] - orden[a.rango] || a.nombre.localeCompare(b.nombre, "es"));
+  const paginas = Math.max(1, Math.ceil(lista.length / POR_PAGINA));
+  const pagina = Math.min(f.pPagina, paginas - 1);
+  const visibles = lista.slice(pagina * POR_PAGINA, (pagina + 1) * POR_PAGINA);
+  const porRango = INSTITUCIONES[inst].rangos.map((r) => [r, activos.filter((p) => p.rango === r).length]).filter(([, n]) => n).reverse();
+  const jefe = app.rol === "jemc";
+  return `<div class="grilla" style="margin-bottom:1.1rem">
+    <section class="panel"><h3>Efectivos <small>${num(activos.length)} activos · ${num(todos.length - activos.length)} de baja</small></h3>
+      <div class="tabla-envoltura"><table><tbody>${unidadesDe(inst).map(([id, n]) => `<tr><td>${esc(n)}</td><td class="num">${num(activos.filter((p) => p.division === id).length)}</td></tr>`).join("")}</tbody></table></div></section>
+    <section class="panel"><h3>Pirámide de rangos</h3>
+      ${porRango.length ? `<div class="tabla-envoltura"><table><tbody>${porRango.map(([r, c]) => `<tr><td>${esc(r)}</td><td class="num">${num(c)}</td><td style="width:45%"><div class="barra-voto" style="margin:0"><div class="lleno" style="width:${Math.max(1, (c / Math.max(...porRango.map((x) => x[1]))) * 100)}%"></div></div></td></tr>`).join("")}</tbody></table></div>` : `<p class="vacio">Todavía no hay personal. ${jefe ? "Usá «Generar plantel» para crearlo con nombres inventados." : ""}</p>`}</section>
+  </div>
+  <div class="acciones" style="margin-bottom:.9rem">
+    <button class="btn btn-primario" data-accion="policia-alta" data-inst="${inst}">${jefe ? "Agregar agente" : "Pedir alta"}</button>
+    ${jefe ? `<button class="btn" data-accion="generar-plantel" data-inst="${inst}">Generar plantel</button>
+    <button class="btn" data-accion="carga-masiva" data-inst="${inst}">Carga masiva</button>
+    ${todos.length ? `<button class="btn" data-accion="renombrar-todos" data-inst="${inst}">Regenerar todos los nombres</button>` : ""}` : ""}
+  </div>
+  <div class="filtros">
+    <input type="text" data-foco="buscar-${inst}" data-cambio-texto="pTexto" data-inst="${inst}" placeholder="Buscar por nombre o función" value="${esc(f.pTexto)}" style="max-width:260px" aria-label="Buscar">
+    <select data-cambio="filtro-personal" data-inst="${inst}" data-campo="pDiv" aria-label="Departamento"><option value="">Todos los departamentos</option>${opciones(unidadesDe(inst), f.pDiv)}</select>
+    <select data-cambio="filtro-personal" data-inst="${inst}" data-campo="pRango" aria-label="Rango"><option value="">Todos los rangos</option>${opciones(INSTITUCIONES[inst].rangos.map((r) => [r, r]), f.pRango)}</select>
+    <select data-cambio="filtro-personal" data-inst="${inst}" data-campo="pEstado" aria-label="Estado">${opciones([["Activo", "Activos"], ["Baja", "De baja"], ["", "Todos"]], f.pEstado)}</select>
+  </div>
+  <div class="panel tabla-envoltura"><table>
+    <thead><tr><th>Nombre</th><th>Rango</th><th>Función</th><th>Departamento</th><th>Estado</th><th></th></tr></thead>
+    <tbody>${visibles.map((p) => `<tr><td><b>${esc(p.nombre)}</b>${p.notas ? `<div class="nota">${esc(p.notas)}</div>` : ""}</td><td>${esc(p.rango)}</td>
+      <td>${p.funcion ? esc(p.funcion) : `<button class="btn btn-chico" data-accion="policia-editar" data-div="${esc(p.division)}" data-id="${esc(p.id)}">Asignar</button>`}</td>
+      <td>${esc(nombreUnidad(app.juego.estado, p.division))}</td>
+      <td><span class="sello sello-${p.estado === "Activo" ? "consolidado" : "bloqueado"}">${p.estado === "Activo" ? "Activo" : "Baja"}</span></td>
+      <td><button class="btn btn-chico" data-accion="policia-editar" data-div="${esc(p.division)}" data-id="${esc(p.id)}">${jefe ? "Editar" : "Pedir cambio"}</button></td></tr>`).join("") || `<tr><td colspan="6" class="vacio">${todos.length ? "Nadie coincide con el filtro." : "No hay personal cargado todavía."}</td></tr>`}</tbody>
+  </table>
+  <div class="acciones" style="margin-top:.8rem;justify-content:space-between"><span class="nota">${num(lista.length)} resultados${paginas > 1 ? ` · página ${pagina + 1} de ${paginas}` : ""}</span>
+  ${paginas > 1 ? `<span class="acciones"><button class="btn btn-chico" data-accion="pagina-personal" data-inst="${inst}" data-valor="${pagina - 1}"${pagina === 0 ? " disabled" : ""}>Anterior</button>
+    <button class="btn btn-chico" data-accion="pagina-personal" data-inst="${inst}" data-valor="${pagina + 1}"${pagina >= paginas - 1 ? " disabled" : ""}>Siguiente</button></span>` : ""}</div>
+  </div>
+  <p class="nota">Los ascensos al rango máximo y las jefaturas plenas de departamento requieren decreto presidencial. El plantel generado deja un jefe interino por departamento.</p>`;
+}
+
+function avisoDecretoHTML() { return `<div class="aviso-decide" data-aviso-policia></div>`; }
+function engancharAvisoPolicia(form, inst) {
+  const caja = form.querySelector("[data-aviso-policia]");
+  const actualizar = () => {
+    const rango = form.querySelector('[name="rango"]')?.value, funcion = form.querySelector('[name="funcion"]')?.value;
+    if (requiereDecreto(inst, rango, funcion)) caja.textContent = "Requiere decreto presidencial: le llega al Presidente para firmar.";
+    else caja.textContent = app.rol === "jemc" ? "Está dentro de tus facultades: se aplica al guardar y queda en el registro." : "Le llega al Jefe del Estado Mayor como pedido y se aplica si lo aprueba.";
+  };
+  form.addEventListener("input", actualizar); form.addEventListener("change", actualizar); actualizar();
+}
+
+function abrirAltaPolicia(inst) {
+  abrirVentana({ titulo: app.rol === "jemc" ? "Agregar agente" : "Pedir alta", subtitulo: esc(INSTITUCIONES[inst].nombre), estatico: `<form data-form="policia-alta" data-inst="${inst}">
+    <label class="campo">Nombre y apellido<span class="acciones" style="flex-wrap:nowrap"><input type="text" name="nombre" required maxlength="120"><button class="btn btn-chico" type="button" data-accion="generar-nombre" data-campo="nombre">Generar nombre</button></span></label>
+    <div class="fila-campos"><label class="campo">Rango${selectRango(inst, INSTITUCIONES[inst].rangos[0])}</label>
+    <label class="campo">Departamento<select name="division">${opciones(unidadesDe(inst))}</select></label></div>
+    <label class="campo">Función<input type="text" name="funcion" maxlength="120"></label>
+    <label class="campo">Notas <small>Opcional</small><input type="text" name="notas" maxlength="300"></label>
+    <label class="campo">Justificación <small>Opcional</small><textarea name="justificacion" style="min-height:3.5em"></textarea></label>
+    ${avisoDecretoHTML()}
+    <button class="btn btn-primario" type="submit">${app.rol === "jemc" ? "Dar de alta" : "Enviar pedido"}</button></form>` });
+  engancharAvisoPolicia($ventana.querySelector("form"), inst);
+}
+
+function abrirEditarPolicia(div, id) {
+  const inst = instDeUnidad(div);
+  const p = (app.juego.personal.find((d) => d.id === div)?.policias || []).find((x) => x.id === id);
+  if (!p) return aviso("Ese agente ya no está en ese departamento.");
+  const pendiente = app.juego.propuestas.some((x) => x.estado === EP.revision && (x.efectos || []).some((e) => e.tipo === "personal" && e.id === id));
+  abrirVentana({ titulo: p.nombre, subtitulo: `${esc(p.rango)} · ${esc(nombreUnidad(app.juego.estado, div))} · alta el ${esc(fechaLarga(p.alta))}`, estatico: `
+    ${pendiente ? `<p class="aviso-decide">Hay un pedido en revisión sobre este agente.</p>` : ""}
+    <form data-form="policia-editar" data-div="${esc(div)}" data-id="${esc(id)}">
+    <label class="campo">Nombre y apellido<input type="text" name="nombre" value="${esc(p.nombre)}" required maxlength="120"></label>
+    <div class="fila-campos"><label class="campo">Rango${selectRango(inst, p.rango)}</label>
+    <label class="campo">Departamento<select name="division">${opciones(unidadesDe(inst), div)}</select></label></div>
+    <label class="campo">Función<input type="text" name="funcion" value="${esc(p.funcion || "")}" maxlength="120"></label>
+    <label class="campo">Notas<input type="text" name="notas" value="${esc(p.notas || "")}" maxlength="300"></label>
+    <label class="campo">Justificación <small>Opcional</small><textarea name="justificacion" style="min-height:3.5em"></textarea></label>
+    ${avisoDecretoHTML()}
+    <div class="acciones"><button class="btn btn-primario" type="submit">${app.rol === "jemc" ? "Guardar cambios" : "Enviar pedido"}</button>
+    <button class="btn btn-peligro" type="button" data-accion="policia-estado" data-div="${esc(div)}" data-id="${esc(id)}" data-op="${p.estado === "Activo" ? "baja" : "reincorporar"}">${p.estado === "Activo" ? "Dar de baja" : "Reincorporar"}</button></div></form>` });
+  engancharAvisoPolicia($ventana.querySelector("form"), inst);
+}
+
+function abrirGenerarPlantel(inst) {
+  const unidades = unidadesDe(inst);
+  const opcionesUnidad = inst === "pfa" ? [["__todos", "Todos los departamentos"], ...unidades] : unidades;
+  abrirVentana({ titulo: "Generar plantel", subtitulo: esc(INSTITUCIONES[inst].nombre), estatico: `<form data-form="generar-plantel" data-inst="${inst}">
+    <p>Crea agentes con nombres inventados (combinaciones al azar de nombres y apellidos comunes), rangos repartidos en pirámide y funciones según el departamento. El de mayor rango de cada departamento queda como jefe interino.</p>
+    <div class="fila-campos"><label class="campo">Departamento<select name="unidad">${opciones(opcionesUnidad, opcionesUnidad[0]?.[0])}</select></label>
+    <label class="campo">Cantidad <small>Por departamento</small><input type="number" name="cantidad" min="1" max="5000" value="${CANTIDAD_SUGERIDA[inst]}"></label></div>
+    <button class="btn btn-primario" type="submit">Generar</button></form>` });
+}
+
+function abrirCargaMasiva(inst) {
+  abrirVentana({ titulo: "Carga masiva", subtitulo: esc(INSTITUCIONES[inst].nombre), estatico: `<form data-form="carga-masiva" data-inst="${inst}">
+    <p>Pegá una línea por agente con <b>nombre; rango; departamento; función</b>, separados por punto y coma o por tabulación. La función es opcional. El departamento puede ir por número (por ejemplo, 2) o por nombre.</p>
+    <pre class="nota" style="background:var(--papel-2);padding:.6rem;border-radius:6px;overflow-x:auto">Nombre Inventado; ${esc(INSTITUCIONES[inst].rangos[0])}; ${esc(unidadesDe(inst)[0]?.[1] || "")}; Función</pre>
+    <label class="campo">Lista<textarea name="lista" style="min-height:12em" required></textarea></label>
+    <p class="nota">Rangos válidos: ${esc(INSTITUCIONES[inst].rangos.join(", "))}.<br>Departamentos: ${esc(unidadesDe(inst).map(([, n]) => n).join("; "))}.</p>
+    <div data-errores></div>
+    <button class="btn btn-primario" type="submit">Revisar y cargar</button></form>` });
+}
+
+function parsearLista(texto, inst) {
+  const rangos = Object.fromEntries(INSTITUCIONES[inst].rangos.map((r) => [normalizar(r), r]));
+  const unidades = {};
+  for (const u of app.juego.estado.unidades[inst]) {
+    unidades[normalizar(u.nombre)] = u.id;
+    if (u.numero) { unidades[String(u.numero)] = u.id; unidades[normalizar(`dpto ${u.numero}`)] = u.id; unidades[normalizar(`Dpto ${u.numero}: ${u.nombre}`)] = u.id; }
+  }
+  const filas = [], errores = [];
+  texto.split(/\r?\n/).forEach((linea, i) => {
+    if (!linea.trim()) return;
+    const [nombre, rango, dpto, funcion = "", notas = ""] = linea.split(linea.includes("\t") ? "\t" : ";").map((x) => x.trim());
+    const r = rangos[normalizar(rango)], d = unidades[normalizar(dpto)];
+    if (!nombre || !r || !d) errores.push(`Línea ${i + 1}: ${!nombre ? "falta el nombre" : !r ? `rango «${rango || ""}» no reconocido` : `departamento «${dpto || ""}» no reconocido`}`);
+    else if (requiereDecreto(inst, r, funcion)) errores.push(`Línea ${i + 1}: ${r}${funcion ? ` / ${funcion}` : ""} requiere decreto presidencial; cargalo individualmente`);
+    else filas.push({ nombre: nombre.slice(0, 120), rango: r, division: d, funcion: funcion.slice(0, 120), notas: notas.slice(0, 300) });
+  });
+  return { filas, errores };
+}
+
+// ---------- pestañas de institución ----------
+function encabezadoInstitucion(inst, texto) {
+  const I = INSTITUCIONES[inst], img = app.juego.estado.escudos?.[inst];
+  const jefe = app.rol === "jemc";
+  return `<div class="encabezado-inst">
+    <div class="escudo">${img ? `<img src="${esc(img)}" alt="Escudo de ${esc(I.corto)}">` : ESCUDOS[inst]}</div>
+    <div><h2>${esc(I.nombre)}</h2><p>${texto}</p>
+      <div class="acciones" style="margin-top:.5rem">
+        <label class="btn btn-chico">${jefe ? "Cambiar escudo" : "Proponer otro escudo"}<input type="file" accept="image/*" data-escudo="${inst}" hidden></label>
+        ${img ? `<button class="btn btn-chico" data-accion="escudo-original" data-inst="${inst}">Volver al escudo original</button>` : ""}
+      </div></div></div>`;
+}
+
+function tablaUnidades(inst) {
+  const activos = personalDe(inst).filter((p) => p.estado === "Activo");
+  const filas = (app.juego.estado.unidades[inst] || []).map((u) => {
+    const de = activos.filter((p) => p.division === u.id);
+    const jefe = de.find(esJefe);
+    return `<tr><td><b>${esc(u.numero ? `Dpto ${u.numero}` : "")}</b></td><td>${esc(u.nombre)}</td><td class="num">${num(de.length)}</td>
+      <td>${jefe ? `${esc(jefe.rango)} ${esc(jefe.nombre)}<div class="nota">${esc(jefe.funcion)}</div>` : `<span class="nota">Sin jefe asignado</span>`}</td>
+      <td><button class="btn btn-chico" data-accion="item" data-esq="unidad-${inst}" data-id="${esc(u.id)}">Editar</button></td></tr>`;
+  }).join("");
+  return `<div class="panel tabla-envoltura"><h3>Departamentos <button class="btn btn-chico" data-accion="item" data-esq="unidad-${inst}">Agregar departamento</button></h3>
+    <table><thead><tr><th></th><th>Departamento</th><th class="num">Activos</th><th>Jefatura</th><th></th></tr></thead><tbody>${filas}</tbody></table>
+    <p class="nota" style="margin-top:.6rem">Para designar la jefatura, editá al agente y poné «Jefe de Departamento» como función: requiere decreto presidencial.</p></div>`;
+}
+
+function tablaVehiculos(sub) {
+  const lista = app.juego.estado[sub];
+  const t = totalConocido(lista);
+  return `<div class="panel tabla-envoltura"><table><thead><tr><th>Modelo</th><th class="num">Cantidad</th><th></th></tr></thead>
+    <tbody>${lista.map((v) => `<tr><td>${esc(v.modelo)}</td><td class="num">${vacio(v.cantidad) ? `<button class="btn btn-chico" data-accion="editar-cantidad" data-lista="${sub}" data-id="${esc(v.id)}">Cargar</button>` : num(v.cantidad)}</td>
+      <td><button class="btn btn-chico" data-accion="editar-cantidad" data-lista="${sub}" data-id="${esc(v.id)}">Cambiar</button></td></tr>`).join("")}</tbody>
+    <tfoot><tr><td>Total</td><td class="num">${num(t.total)}</td><td></td></tr></tfoot></table>
+    ${sub === "pfaHelicopteros" ? `<p class="nota" style="margin-top:.6rem">Los UH-60 Black Hawk son militares y no se cuentan como helicópteros policiales.</p>` : ""}</div>`;
+}
+
+function vistaInstitucion(inst) {
+  const e = app.juego.estado;
+  if (inst === "pfa") {
+    const tabs = [["personal", "Personal"], ["departamentos", "Departamentos"], ["terrestre", "Flota terrestre"], ["helicopteros", "Helicópteros"]];
+    const sub = subActual("pfa", tabs);
+    const cuerpo = sub === "personal" ? vistaPersonal("pfa") : sub === "departamentos" ? tablaUnidades("pfa") : tablaVehiculos(sub === "terrestre" ? "pfaTerrestre" : "pfaHelicopteros");
+    return `${encabezadoInstitucion("pfa", `${esc(e.pfa.nota)} Bajo la autoridad del ${esc(e.pfa.autoridad)}.`)}${subtabs("pfa", tabs)}${cuerpo}
+      ${sub === "departamentos" ? `<p class="nota">${esc(e.federalismo.cordoba)}</p>` : ""}`;
+  }
+  const tabs = [["personal", "Personal"], ["departamentos", "Departamentos"], ["expedientes", "Expedientes clasificados"], ["misiones", "Misiones"]];
+  const sub = subActual(inst, tabs);
+  const docs = app.juego.inteligencia.filter((d) => d.inst === inst && !d.anulado);
+  let cuerpo;
+  if (sub === "personal") cuerpo = vistaPersonal(inst);
+  else if (sub === "departamentos") cuerpo = tablaUnidades(inst);
+  else if (sub === "expedientes") {
+    const exps = docs.filter((d) => d.tipo === "expediente");
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="doc" data-esq="expediente" data-inst="${inst}">Nuevo expediente</button></div>
+      <div class="panel">${tablaDocs(exps, [["titulo", "Carátula"], [(d) => `<span class="sello sello-${d.clasificacion === "Estrictamente secreto" || d.clasificacion === "Secreto" ? "bloqueado" : "pendiente"}">${esc(d.clasificacion || "")}</span>`, "Clasificación"], ["estado", "Estado"], [(d) => esc(d.unidad ? nombreUnidad(e, d.unidad) : ""), "Departamento"], ["responsable", "Responsable"], [(d) => esc(fechaLarga(d.fechaJuego)), "Apertura"]], "expediente", inst, "No hay expedientes. Abrí el primero.")}</div>`;
+  } else {
+    const mis = docs.filter((d) => d.tipo === "mision");
+    const enCurso = mis.filter((m) => m.estado === "En curso" || m.estado === "Planificada");
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="doc" data-esq="mision" data-inst="${inst}">Nueva misión</button><span class="nota">${enCurso.length} en curso o planificadas</span></div>
+      <div class="panel">${tablaDocs(mis, [["titulo", "Nombre en clave"], ["estado", "Estado"], ["riesgo", "Riesgo"], [(d) => esc(d.unidad ? nombreUnidad(e, d.unidad) : ""), "Departamento"], ["responsable", "Responsable"], [(d) => esc(fechaLarga(d.fechaJuego)), "Inicio"]], "mision", inst, "No hay misiones registradas.")}</div>`;
+  }
+  const textos = { side: "Inteligencia y contrainteligencia. Bajo la autoridad del Jefe del Estado Mayor Conjunto.", afi: "Protección de instalaciones estratégicas y controles de acceso. Bajo la autoridad del Jefe del Estado Mayor Conjunto." };
+  return `${encabezadoInstitucion(inst, textos[inst])}${subtabs(inst, tabs)}${cuerpo}`;
+}
+
+// ---------- FAdeA ----------
+function fichaTecnica(id, campos = CAMPOS_FICHA, base = `fichas.${id}`) {
+  const f = obtener(app.juego.estado, base) || {};
+  return `<div class="tabla-envoltura"><table><tbody>${Object.entries(campos).map(([k, t]) => `<tr><td>${esc(t)}</td><td>${cargable(f[k], `${base}.${k}`, t)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function verModelo(id) {
+  const vivo = () => {
+    const m = app.juego.estado.fadea.modelos.find((x) => x.id === id);
+    if (!m) return `<p class="vacio">El modelo ya no existe.</p>`;
+    const inv = app.juego.estado.aereo.find((a) => a.id === id);
+    return `${ficha([["Rol", esc(m.rol || "")], ["Estado del programa", sello(m.estado === "En producción" ? "Consolidado" : m.estado === "Retirado" ? "Cancelado" : "En evaluación").replace(/>[^<]*</, `>${esc(m.estado || "Sin estado")}<`)],
+      ["En inventario", inv ? num(inv.cantidad ?? 0) : "Todavía no hay unidades entregadas"], ["Uso exclusivo argentino", esc(m.exclusivo || "")], m.notas ? ["Notas", esc(m.notas)] : null])}
+      <div class="acciones" style="margin-bottom:1rem"><button class="btn" data-accion="item" data-esq="modelo" data-id="${esc(id)}">Editar datos del modelo</button></div>
+      <h3 style="margin-bottom:.5rem">Ficha técnica</h3>${fichaTecnica(id)}
+      <p class="nota" style="margin-top:.6rem">La ficha es ficticia y la completan los jugadores; la aplicación no agrega datos por su cuenta.</p>`;
+  };
+  abrirVentana({ titulo: () => app.juego.estado.fadea.modelos.find((x) => x.id === id)?.nombre || "Modelo", vivo });
+}
+
+function vistaFadea() {
+  const e = app.juego.estado, F = e.fadea;
+  const tabs = [["resumen", "Resumen"], ["produccion", "Producción y entregas"], ["plantas", "Plantas"], ["modelos", "Modelos y fichas"], ["finanzas", "Finanzas"], ["filtraciones", "Filtraciones"]];
+  const sub = subActual("fadea", tabs);
+  const ordenes = app.juego.ordenes.filter((o) => !o.anulado);
+  const filtr = app.juego.filtraciones.filter((f) => !f.anulado);
+  const gastado = gastosFadea(e);
+  const pres = F.presupuestoAnual;
+  const nombreModelo = (id) => F.modelos.find((m) => m.id === id)?.nombre || id;
+  let cuerpo;
+  if (sub === "resumen") {
+    cuerpo = `<div class="grilla">
+      <section class="panel"><h3>Modelos en producción</h3>${F.modelos.filter((m) => m.estado === "En producción").map((m) => `<div class="item-bandeja"><div><b>${esc(m.nombre)}</b><div class="meta">${esc(m.rol || "")}</div></div><div>${num(e.aereo.find((a) => a.id === m.id)?.cantidad ?? 0)} en servicio</div></div>`).join("") || `<p class="vacio">Ninguno.</p>`}</section>
+      <section class="panel"><h3>Órdenes activas</h3>${ordenes.filter((o) => o.estado !== "Entregada").map((o) => `<div class="item-bandeja"><div><b>${esc(nombreModelo(o.modelo))}</b><div class="meta">${num(o.entregadas || 0)} de ${num(o.cantidad)} entregadas</div></div>${sello(o.estado === "Suspendida" ? "Cancelado" : "En evaluación").replace(/>[^<]*</, `>${esc(o.estado)}<`)}</div>`).join("") || `<p class="vacio">No hay órdenes activas.</p>`}</section>
+      <section class="panel"><h3>Finanzas</h3><p>Presupuesto anual: ${cargable(pres, "fadea.presupuestoAnual", "Presupuesto anual de FAdeA (US$ millones)", "numero", (v) => `<b>US$ ${num(v)} millones</b>`)}</p>
+        <p>Gastado: <b>US$ ${num(gastado)} millones</b>${typeof pres === "number" ? ` · saldo: <b>US$ ${num(pres - gastado)} millones</b>` : ""}</p></section>
+      <section class="panel"><h3>Filtraciones abiertas</h3>${filtr.filter((f) => f.estado !== "Cerrada").map((f) => `<div class="item-bandeja"><div><b>${esc(f.titulo)}</b><div class="meta">${esc(f.gravedad)} · ${esc(f.estado)}</div></div></div>`).join("") || `<p class="vacio">Ninguna.</p>`}</section>
+    </div>`;
+  } else if (sub === "produccion") {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="doc" data-esq="orden">Nueva orden de producción</button></div>
+      <div class="panel">${tablaDocs(ordenes, [[(o) => esc(nombreModelo(o.modelo)), "Modelo"], [(o) => `${num(o.entregadas || 0)} / ${num(o.cantidad)}`, "Entregadas"], [(o) => esc(F.plantas.find((p) => p.id === o.planta)?.nombre || ""), "Planta"], ["estado", "Estado"], ["fechaEstimada", "Entrega estimada"]], "orden", null, "No hay órdenes de producción.")}</div>
+      <p class="nota">Una orden nueva es una compra: la autoriza el Presidente. Una vez autorizada, registrar entregas lo decidís vos y cada entrega suma al inventario de la Fuerza Aérea.</p>`;
+  } else if (sub === "plantas") {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="item" data-esq="planta">Agregar planta o instalación</button></div>
+      <div class="panel">${tablaItems(F.plantas, [["nombre", "Planta"], ["ubicacion", "Ubicación"], ["estado", "Estado"], ["capacidad", "Capacidad"], ["funcion", "Función"]], "planta")}</div>`;
+  } else if (sub === "modelos") {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="item" data-esq="modelo">Proponer modelo nuevo</button></div>
+      <div class="panel tabla-envoltura"><table><thead><tr><th>Modelo</th><th>Rol</th><th>Estado</th><th class="num">En servicio</th><th>Ficha técnica</th></tr></thead><tbody>
+      ${F.modelos.map((m) => { const f = e.fichas?.[m.id] || {}; const cargados = Object.keys(CAMPOS_FICHA).filter((k) => !vacio(f[k])).length;
+        return `<tr class="clic" data-accion="ver-modelo" data-id="${esc(m.id)}" tabindex="0"><td><b>${esc(m.nombre)}</b></td><td>${esc(m.rol || "")}</td><td>${esc(m.estado || "")}</td><td class="num">${num(e.aereo.find((a) => a.id === m.id)?.cantidad ?? 0)}</td><td>${cargados} de ${Object.keys(CAMPOS_FICHA).length} campos</td></tr>`; }).join("")}
+      </tbody></table></div><p class="nota">Un modelo nuevo es un programa nuevo de FAdeA: lo autoriza el Presidente. Las fichas técnicas las cargás vos.</p>`;
+  } else if (sub === "finanzas") {
+    const movs = [...F.movimientos].reverse();
+    cuerpo = `<div class="grilla" style="margin-bottom:1.1rem"><section class="panel"><h3>Presupuesto anual</h3><p>${cargable(pres, "fadea.presupuestoAnual", "Presupuesto anual de FAdeA (US$ millones)", "numero", (v) => `<b>US$ ${num(v)} millones</b>`)}</p>
+      <p>Gastado: <b>US$ ${num(gastado)} millones</b>${typeof pres === "number" ? ` · saldo <b>US$ ${num(pres - gastado)} millones</b>` : ""}</p>
+      <p class="nota">El presupuesto lo fija el Presidente. Los gastos dentro del saldo los registrás vos; si lo superan, o si no hay presupuesto fijado, necesitan su autorización.</p></section></div>
+      <div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="item" data-esq="movimiento">Registrar movimiento</button></div>
+      <div class="panel">${tablaItems(movs, [["concepto", "Concepto"], ["tipo", "Tipo"], [(m) => `US$ ${num(m.monto)} M`, "Monto"], ["estado", "Estado"], [(m) => esc(fechaLarga(m.alta)), "Fecha"]], "movimiento")}</div>`;
+  } else {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="doc" data-esq="filtracion">Registrar filtración</button></div>
+      <div class="panel">${tablaDocs(filtr, [["titulo", "Filtración"], [(f) => `<span class="sello sello-${f.gravedad === "Crítica" || f.gravedad === "Alta" ? "bloqueado" : "pendiente"}">${esc(f.gravedad)}</span>`, "Gravedad"], ["estado", "Estado"], ["trascendio", "Trascendió"], ["origen", "Origen sospechado"], [(f) => esc(fechaLarga(f.fechaJuego)), "Fecha"]], "filtracion", null, "No hay filtraciones registradas.")}</div>
+      <p class="nota">Si una filtración trasciende públicamente, la aprobación del gobierno baja según la gravedad: ${Object.entries(IMPACTO_FILTRACION).map(([g, d]) => `${g} ${d}`).join(", ")} puntos.</p>`;
+  }
+  return `${encabezado("FAdeA", "Fábrica Argentina de Aviones en la partida. La administra el Jefe del Estado Mayor Conjunto; órdenes, modelos nuevos y gastos fuera de presupuesto los autoriza el Presidente.")}${subtabs("fadea", tabs)}${cuerpo}`;
+}
+
+// ---------- Gobierno ----------
+function vistaGobierno() {
+  const e = app.juego.estado;
+  const tabs = [["opinion", "Opinión pública"], ["gabinete", "Gabinete"], ["congreso", "Congreso"], ["provincias", "Provincias"], ["exteriores", "Exteriores y tratados"]];
+  const sub = subActual("gobierno", tabs);
+  let cuerpo;
+  if (sub === "opinion") {
+    const op = e.gobierno.opinionPublica;
+    const hist = [...(op.historial || [])].reverse();
+    cuerpo = `<div class="grilla"><section class="panel"><h3>Aprobación del gobierno</h3>
+      <p class="codigo">${typeof op.aprobacion === "number" ? `${String(op.aprobacion).replace(".", ",")}%` : ""}</p>
+      <p>${cargable(op.aprobacion, "gobierno.opinionPublica.aprobacion", "Aprobación del gobierno (%)", "numero", () => "Medición actual")}</p>
+      <p class="nota">Las propuestas pueden llevar un impacto en la opinión pública, que se aplica si se aprueban. Las filtraciones que trascienden bajan la aprobación según su gravedad.${typeof op.aprobacion === "number" ? "" : " Hasta que se cargue una medición inicial, los impactos no se aplican."}</p></section>
+      <section class="panel"><h3>Historial</h3>${hist.length ? `<div class="tabla-envoltura"><table><tbody>${hist.map((h) => `<tr><td>${esc(fechaLarga(h.fecha))}</td><td class="num"><b>${String(h.valor).replace(".", ",")}%</b></td><td>${esc(h.motivo)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="vacio">Sin mediciones todavía.</p>`}</section></div>`;
+  } else if (sub === "gabinete") {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="item" data-esq="gabinete">Agregar cargo</button></div>
+      <div class="panel">${tablaItems(e.gabinete, [["cargo", "Cargo"], ["titular", "Titular"], ["estado", "Estado"], ["notas", "Notas"]], "gabinete")}</div>
+      <p class="nota">Los nombres son inventados: usá «Generar nombre» al nombrar a alguien.</p>`;
+  } else if (sub === "congreso") {
+    const c = e.congreso;
+    const suma = (l) => l.reduce((n, b) => n + (Number(b.bancas) || 0), 0);
+    const leyes = app.juego.leyes.filter((l) => !l.anulado);
+    const votosTxt = (v) => (v && !vacio(v.afirmativos) ? `${num(v.afirmativos)} a ${num(v.negativos ?? 0)}` : "");
+    cuerpo = `<div class="grilla" style="margin-bottom:1.1rem">
+      <section class="panel"><h3>Diputados <small>${num(suma(c.bloquesDiputados))} de ${num(c.bancasDiputados)} bancas asignadas</small></h3>
+        ${tablaItems(c.bloquesDiputados, [["nombre", "Bloque"], [(b) => num(b.bancas), "Bancas"], ["postura", "Postura"]], "bloqueDiputados")}
+        <button class="btn btn-chico" style="margin-top:.6rem" data-accion="item" data-esq="bloqueDiputados">Agregar bloque</button></section>
+      <section class="panel"><h3>Senado <small>${num(suma(c.bloquesSenado))} de ${num(c.bancasSenado)} bancas asignadas</small></h3>
+        ${tablaItems(c.bloquesSenado, [["nombre", "Bloque"], [(b) => num(b.bancas), "Bancas"], ["postura", "Postura"]], "bloqueSenado")}
+        <button class="btn btn-chico" style="margin-top:.6rem" data-accion="item" data-esq="bloqueSenado">Agregar bloque</button></section></div>
+      <div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="doc" data-esq="ley">Nuevo proyecto de ley</button></div>
+      <div class="panel">${tablaDocs(leyes, [["titulo", "Proyecto"], ["origen", "Origen"], ["estado", "Estado"], [(l) => esc(votosTxt(l.votosDiputados)), "Diputados"], [(l) => esc(votosTxt(l.votosSenado)), "Senado"]], "ley", null, "No hay proyectos de ley.")}</div>`;
+  } else if (sub === "provincias") {
+    cuerpo = `<div class="panel">${tablaItems(e.provincias, [["nombre", "Jurisdicción"], ["gobernador", "Gobernador/a"], ["alineamiento", "Relación"], ["acuerdos", "Acuerdos"], ["notas", "Notas"]], "provincia")}</div>`;
+  } else {
+    cuerpo = `<div class="acciones" style="margin-bottom:.9rem"><button class="btn btn-primario" data-accion="item" data-esq="relacion">Nueva relación bilateral</button><button class="btn" data-accion="item" data-esq="tratado">Nuevo tratado</button></div>
+      <div class="panel"><h3>Relaciones bilaterales</h3>${tablaItems(e.relaciones, [["pais", "País"], ["estado", "Estado"], ["temas", "Temas"]], "relacion")}</div>
+      <div class="panel"><h3>Tratados y acuerdos</h3>${tablaItems(e.tratados, [["nombre", "Tratado"], ["partes", "Partes"], ["tipo", "Tipo"], ["estado", "Estado"], ["notas", "Notas"]], "tratado")}</div>
+      <p class="nota">Las conversaciones no equivalen a acuerdos firmados: el estado de cada tratado lo definen los jugadores.</p>`;
+  }
+  return `${encabezado("Gobierno", "Conducción del Presidente: gabinete, Congreso, provincias y relaciones exteriores. El Jefe del Estado Mayor puede proponer y el Presidente decide.")}${subtabs("gobierno", tabs)}${cuerpo}`;
 }
 
 const TIPOS_INTERVENCION = { hecho: "Hecho establecido", incertidumbre: "Incertidumbre", opcion: "Opción", consecuencia: "Consecuencia posible", comentario: "Debate" };
@@ -621,6 +1231,7 @@ function verProyecto(id) {
 function verAeronave(id) {
   const vivo = () => {
     const a = app.juego.estado.aereo.find((x) => x.id === id);
+    if (!a) return `<p class="vacio">La aeronave ya no existe.</p>`;
     const explicacion = {
       propio: "Es una aeronave real dentro del inventario de la partida: la referencia es el propio modelo.",
       analogia: "El modelo de la partida es ficticio. La aeronave real es solo una analogía conceptual, no una fuente técnica.",
@@ -631,8 +1242,9 @@ function verAeronave(id) {
       ["Función general", esc(a.funcion)], ["Fabricante", esc(a.fabricante)], ["País de referencia", esc(a.pais)],
       ["Referencia", `${esc(a.referencia)}<div class="ref-${esc(a.tipoReferencia)}">${esc(ETIQUETA_REF[a.tipoReferencia])}</div><div class="nota">${esc(explicacion)}</div>`],
       a.nota ? ["Nota", esc(a.nota)] : null,
-      ["Especificaciones técnicas", sinDato("No definidas en la partida")],
-    ])}<button class="btn btn-primario" data-accion="editar-cantidad" data-lista="aereo" data-id="${esc(id)}">Proponer cambio de cantidad</button>`;
+    ])}<button class="btn btn-primario" data-accion="editar-cantidad" data-lista="aereo" data-id="${esc(id)}">Proponer cambio de cantidad</button>
+    <h3 style="margin:1.1rem 0 .5rem">Ficha técnica</h3>${fichaTecnica(id)}
+    <p class="nota" style="margin-top:.6rem">Ficticia: la completan los jugadores. La aplicación no agrega datos por su cuenta.</p>`;
   };
   abrirVentana({ titulo: app.juego.estado.aereo.find((x) => x.id === id)?.modelo || "Aeronave", vivo });
 }
@@ -933,7 +1545,7 @@ const ACCIONES = {
   },
   "entrar-nueva": (d) => { history.replaceState(null, "", location.pathname + "#despacho"); entrar(d.codigo, d.rol, d.nombre); },
   "copiar": async (d, el) => { try { await navigator.clipboard.writeText(d.texto); el.textContent = "Copiado"; } catch { aviso("No se pudo copiar: seleccioná el texto y copialo a mano."); } },
-  "subtab": (d) => { app.sub[d.grupo] = d.valor; render(); },
+  "subtab": (d, el) => { app.sub[d.grupo] = d.valor; const h = el.getAttribute("href"); if (h && location.hash !== h) location.hash = h; else render(); },
   "nueva-propuesta": (d) => abrirNuevaPropuesta({ dominio: d.dominio, efecto: d.efecto, proyecto: d.proyecto, campo: d.campo, pais: d.pais, asunto: d.asunto }),
   "nuevo-asunto": abrirNuevoAsunto,
   "nueva-votacion": (d) => abrirNuevaVotacion(d.asunto || ""),
@@ -979,6 +1591,31 @@ const ACCIONES = {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
+  "policia-alta": (d) => abrirAltaPolicia(d.inst),
+  "carga-masiva": (d) => abrirCargaMasiva(d.inst),
+  "generar-plantel": (d) => abrirGenerarPlantel(d.inst),
+  "renombrar-todos": async (d) => {
+    if (!confirm(`¿Reemplazar los nombres de todo el personal de ${INSTITUCIONES[d.inst].corto} por nombres generados? Rangos, funciones y departamentos no cambian.`)) return;
+    await ejecutar(() => app.juego.renombrarTodos(d.inst), (r) => `${r.total.toLocaleString("es-AR")} nombres regenerados`).catch(() => {});
+  },
+  "policia-editar": (d) => abrirEditarPolicia(d.div, d.id),
+  "pagina-personal": (d) => { filtrosDe(d.inst).pPagina = Math.max(0, Number(d.valor)); render(); },
+  "item": (d) => abrirItem(d.esq, d.id || null),
+  "doc": (d) => abrirDoc(d.esq, d.id || null, d.inst || null),
+  "dato": (d) => abrirDato(d.ruta, d.titulo, d.tipo),
+  "ver-modelo": (d) => verModelo(d.id),
+  "generar-nombre": (d, el) => { const input = el.closest("form").querySelector(`[name="${d.campo}"]`); input.value = generarNombre(); input.dispatchEvent(new Event("input", { bubbles: true })); },
+  "escudo-original": async (d) => ejecutar(() => app.juego.proponer({ titulo: `Escudo original de ${INSTITUCIONES[d.inst].corto}`, dominio: d.inst, efectos: [{ tipo: "dato", ruta: `escudos.${d.inst}`, valor: null }] }), "Escudo restablecido").catch(() => {}),
+  "policia-estado": async (d, el) => {
+    const justificacion = el.closest("form")?.querySelector('[name="justificacion"]')?.value.trim() || "";
+    const nombre = el.closest("form")?.querySelector('[name="nombre"]')?.value || "";
+    const inst = instDeUnidad(d.div);
+    const r = await ejecutar(() => app.juego.proponer({
+      titulo: `${d.op === "baja" ? "Baja" : "Reincorporación"} de ${nombre} (${INSTITUCIONES[inst].corto})`, dominio: INSTITUCIONES[inst].dominio, justificacion,
+      efectos: [{ tipo: "personal", op: d.op, inst, division: d.div, id: d.id, nombre }],
+    }), (r) => (r.decide === app.rol ? (d.op === "baja" ? "Baja registrada" : "Reincorporación registrada") : "Pedido enviado al Jefe del Estado Mayor")).catch(() => null);
+    if (r) cerrarVentana();
+  },
   "salir": () => { app.juego?.cerrar(); app.juego = null; guardarLocal("atlas.sesion", null); history.replaceState(null, "", location.pathname); pantallaInicio(); },
 };
 
@@ -996,6 +1633,17 @@ document.addEventListener("change", async (ev) => {
   const el = ev.target;
   const tipo = el.dataset?.cambio;
   if (tipo === "filtro") { app.filtros[el.dataset.campo] = el.value; render(); }
+  else if (tipo === "filtro-personal") { const f = filtrosDe(el.dataset.inst); f[el.dataset.campo] = el.value; f.pPagina = 0; render(); }
+  else if (el.dataset?.escudo) {
+    const inst = el.dataset.escudo, archivo = el.files?.[0];
+    if (!archivo) return;
+    try {
+      const url = await imagenADataURL(archivo);
+      await ejecutar(() => app.juego.proponer({ titulo: `Nuevo escudo de ${INSTITUCIONES[inst].corto}`, dominio: inst, efectos: [{ tipo: "dato", ruta: `escudos.${inst}`, valor: url }] }),
+        (r) => (r.decide === app.rol ? "Escudo actualizado" : "Pedido enviado al Jefe del Estado Mayor"));
+    } catch (e) { if (!e.mostrado) aviso(`<span class="error">${esc(e.message)}</span>`); }
+    el.value = "";
+  }
   else if (tipo === "tipo-efecto") {
     const form = el.closest("form");
     form.querySelector("[data-subform]").innerHTML = subformEfecto(el.value);
@@ -1005,6 +1653,15 @@ document.addEventListener("change", async (ev) => {
   } else if (tipo === "voto") {
     await ejecutar(() => app.juego.votar(el.dataset.id, el.dataset.pais, el.value || null), `Voto de ${el.dataset.pais} registrado`).catch(() => refrescarVentana());
   }
+});
+
+document.addEventListener("input", (ev) => {
+  const campo = ev.target.dataset?.cambioTexto;
+  if (!campo) return;
+  const f = filtrosDe(ev.target.dataset.inst);
+  f[campo] = ev.target.value;
+  f.pPagina = 0;
+  render();
 });
 
 document.addEventListener("submit", async (ev) => {
@@ -1075,6 +1732,65 @@ document.addEventListener("submit", async (ev) => {
       case "preparar-voto": {
         await ejecutar(() => app.juego.prepararVotoArgentino(form.dataset.id, t("voto"), t("justificacion")), "Pedido enviado al Presidente");
         verVotacion(form.dataset.id);
+        break;
+      }
+      case "policia-alta": {
+        const inst = form.dataset.inst;
+        const r = await ejecutar(() => app.juego.proponer({
+          titulo: `Alta de ${t("nombre")} (${INSTITUCIONES[inst].corto})`, dominio: INSTITUCIONES[inst].dominio, justificacion: t("justificacion"),
+          efectos: [{ tipo: "personal", op: "alta", inst, division: t("division"), policia: { id: nuevoId("pol"), nombre: t("nombre"), rango: t("rango"), funcion: t("funcion"), notas: t("notas") } }],
+        }), (r) => (r.decide === app.rol ? "Alta registrada" : `Pedido enviado al ${nombreRol(r.decide)}`));
+        if (r) cerrarVentana();
+        break;
+      }
+      case "policia-editar": {
+        const div = form.dataset.div, id = form.dataset.id;
+        const p = (app.juego.personal.find((d) => d.id === div)?.policias || []).find((x) => x.id === id);
+        if (!p) throw new ErrorJuego("Ese policía ya no está en esa división");
+        const cambios = {};
+        if (t("nombre") !== p.nombre) cambios.nombre = t("nombre");
+        if (t("rango") !== p.rango) cambios.rango = t("rango");
+        if (t("division") !== div) cambios.division = t("division");
+        if (t("notas") !== (p.notas || "")) cambios.notas = t("notas");
+        if (t("funcion") !== (p.funcion || "")) cambios.funcion = t("funcion");
+        if (!Object.keys(cambios).length) throw new ErrorJuego("No cambiaste ningún dato");
+        const inst = instDeUnidad(div), orden = ordenRango(inst);
+        const r = await ejecutar(() => app.juego.proponer({
+          titulo: `${cambios.rango ? (orden[cambios.rango] > orden[p.rango] ? "Ascenso" : "Cambio de rango") : cambios.funcion !== undefined ? "Cambio de función" : "Cambio de datos"}: ${p.nombre} (${INSTITUCIONES[inst].corto})`,
+          dominio: INSTITUCIONES[inst].dominio, justificacion: t("justificacion"),
+          efectos: [{ tipo: "personal", op: "editar", inst, division: div, id, nombre: p.nombre, cambios }],
+        }), (r) => (r.decide === app.rol ? "Cambio registrado" : `Pedido enviado al ${nombreRol(r.decide)}`));
+        if (r) cerrarVentana();
+        break;
+      }
+      case "carga-masiva": {
+        const { filas, errores } = parsearLista(fd.get("lista") || "", form.dataset.inst);
+        const caja = form.querySelector("[data-errores]");
+        if (errores.length) {
+          caja.innerHTML = `<div class="error"><b>Hay ${errores.length} líneas con problemas; no se cargó nada.</b><ul class="lista-simple">${errores.slice(0, 12).map((e) => `<li>${esc(e)}</li>`).join("")}</ul>${errores.length > 12 ? `<p>Y ${errores.length - 12} más.</p>` : ""}</div>`;
+          break;
+        }
+        if (!filas.length) throw new ErrorJuego("La lista está vacía");
+        if (!confirm(`¿Cargar ${filas.length.toLocaleString("es-AR")} policías?`)) break;
+        await ejecutar(() => app.juego.cargaMasiva(filas, `Carga masiva (${INSTITUCIONES[form.dataset.inst].corto})`), `${filas.length.toLocaleString("es-AR")} agentes cargados`);
+        cerrarVentana();
+        break;
+      }
+      case "generar-plantel": {
+        const inst = form.dataset.inst, cantidad = Number(t("cantidad"));
+        if (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 5000) throw new ErrorJuego("Elegí una cantidad entre 1 y 5.000");
+        const unidades = t("unidad") === "__todos" ? app.juego.estado.unidades[inst].map((u) => u.id) : [t("unidad")];
+        if (!confirm(`¿Generar ${(cantidad * unidades.length).toLocaleString("es-AR")} agentes con nombres inventados?`)) break;
+        for (const u of unidades) await ejecutar(() => app.juego.generarPlantel(u, cantidad));
+        aviso(`${(cantidad * unidades.length).toLocaleString("es-AR")} agentes generados`);
+        cerrarVentana();
+        break;
+      }
+      case "generico": {
+        const r = construirConImpacto(fd);
+        await ejecutar(() => app.juego.proponer({ titulo: r.titulo, dominio: r.dominio, efectos: r.efectos, justificacion: t("justificacion") }),
+          (res) => (res.decide === app.rol ? "Registrado" : `Pedido enviado al ${nombreRol(res.decide)}`));
+        cerrarVentana();
         break;
       }
       case "fecha": {

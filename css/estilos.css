@@ -303,3 +303,12 @@ body.rol-presidente .aviso.del-otro { --otro: var(--jemc); }
 }
 dialog.ventana .avisos { position: fixed; }
 .item-bandeja > div:last-child:not(:first-child) { text-align: right; }
+
+/* ---------- Instituciones con escudo ---------- */
+.encabezado-inst { display: flex; gap: 1.2rem; align-items: center; margin-bottom: 1.2rem; }
+.encabezado-inst .escudo { width: 92px; flex: none; }
+.encabezado-inst .escudo svg, .encabezado-inst .escudo img { width: 92px; height: auto; display: block; }
+.encabezado-inst .escudo img { max-height: 110px; object-fit: contain; }
+.encabezado-inst p { color: var(--tinta-2); margin: 0.3rem 0 0; max-width: 70ch; }
+@media (max-width: 860px) { .encabezado-inst .escudo, .encabezado-inst .escudo svg, .encabezado-inst .escudo img { width: 64px; } }
+label.btn input[type="file"] { display: none; }

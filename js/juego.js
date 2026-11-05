@@ -12,10 +12,13 @@ import { estadoInicial, REGISTRO_INICIAL } from "./datos-iniciales.js";
 import {
   ROLES, DOMINIOS, ESTADOS_PROPUESTA as EP, otroRol, rolQueDecide, aplicarEfectos, revertirEfectos,
   resultadoVotacion, UMBRAL_GUERRA, generarCodigo, generarPin, generarId, describirEfecto, fechaLarga,
+  aplicarPersonal, revertirPersonal, divisionesDeEfectos, INSTITUCIONES, nombreUnidad, instDeUnidad,
 } from "./reglas.js";
+import { migrarEstado, documentosIniciales, MAPA_DIVISIONES, VERSION_ACTUAL } from "./migracion.js";
+import { generarPlantel, generarNombresUnicos, funcionPara } from "./nombres.js";
 import { construirInforme } from "./informes.js";
 
-const COLECCIONES = ["propuestas", "asuntos", "votaciones", "registro", "informes"];
+const COLECCIONES = ["propuestas", "asuntos", "votaciones", "registro", "informes", "personal", "ordenes", "filtraciones", "inteligencia", "leyes"];
 const ahora = () => new Date().toISOString();
 
 export class ErrorJuego extends Error {}
@@ -31,11 +34,14 @@ export async function crearPartida(backend, { nombre, rol }) {
     exigir(!datos[ruta], "Ese código ya existe; probá de nuevo");
     const writes = {
       [ruta]: {
-        codigo, nombre: (nombre || "Partida ATLAS").trim().slice(0, 80), creada: ahora(), version: 1,
+        codigo, nombre: (nombre || "Partida ATLAS").trim().slice(0, 80), creada: ahora(), version: VERSION_ACTUAL,
         jugadores: { jemc: null, presidente: null, [rol]: { uid: backend.uid, pin } },
-        estado: estadoInicial(),
+        estado: migrarEstado(estadoInicial()),
       },
     };
+    for (const [col, docs] of Object.entries(documentosIniciales(fechaJuego))) {
+      for (const d of docs) writes[`${ruta}/${col}/${d.id}`] = d;
+    }
     for (const r of REGISTRO_INICIAL) {
       writes[`${ruta}/registro/${r.id}`] = { ...r, fecha: ahora(), fechaJuego, rol: "acuerdo" };
     }
@@ -84,6 +90,13 @@ export class Juego {
   // Se suscribe una sola vez a la partida y sus colecciones.
   conectar(onCambio, onError) {
     this.desuscribir.push(this.backend.onDoc(this.ruta, (d) => {
+      if (d && (d.version || 1) < VERSION_ACTUAL) {
+        // Partida de una versión anterior: se actualiza una sola vez y llega el snapshot nuevo.
+        if (!this.migrando) {
+          this.migrando = this.migrar().catch((e) => { this.migrando = null; onError && onError(e); });
+        }
+        return;
+      }
       this.partida = d; this.cargado.partida = true; onCambio("partida");
     }, onError));
     for (const c of COLECCIONES) {
@@ -98,6 +111,133 @@ export class Juego {
 
   // ---------- utilidades internas ----------
   rutaDe(col, id) { return `${this.ruta}/${col}/${id}`; }
+  rutaDiv(div) { return this.rutaDe("personal", div); }
+  rutasPersonal(efectos) {
+    const docs = (efectos || []).filter((e) => e.tipo === "doc").map((e) => this.rutaDe(e.col, e.id));
+    return [...divisionesDeEfectos(efectos).map((d) => this.rutaDiv(d)), ...docs];
+  }
+
+  // Actualiza una partida de la versión 1. Idempotente: si otro dispositivo ya la migró, no hace nada.
+  async migrar() {
+    const viejas = Object.keys(MAPA_DIVISIONES).map((d) => this.rutaDiv(d));
+    const nuevas = [...new Set(Object.values(MAPA_DIVISIONES))].map((d) => this.rutaDiv(d));
+    const fechaJuego = (await this.backend.get(this.ruta))?.estado?.fechaJuego;
+    const iniciales = documentosIniciales(fechaJuego);
+    const rutasDocs = Object.entries(iniciales).flatMap(([col, docs]) => docs.map((d) => this.rutaDe(col, d.id)));
+    return this.backend.transact([this.ruta, ...viejas, ...nuevas, ...rutasDocs], (datos) => {
+      const partida = datos[this.ruta];
+      if (!partida || (partida.version || 1) >= VERSION_ACTUAL) return { writes: {} };
+      const estado = migrarEstado(partida.estado);
+      const writes = { [this.ruta]: { ...partida, version: VERSION_ACTUAL, estado } };
+      let movidos = 0;
+      for (const [vieja, nueva] of Object.entries(MAPA_DIVISIONES)) {
+        const doc = datos[this.rutaDiv(vieja)];
+        if (!doc?.policias?.length) continue;
+        const rutaNueva = this.rutaDiv(nueva);
+        const destino = structuredClone(writes[rutaNueva] || datos[rutaNueva] || { division: nueva, policias: [] });
+        const rangos = INSTITUCIONES[instDeUnidad(nueva)].rangos;
+        for (const p of doc.policias) {
+          destino.policias.push({ ...p, funcion: p.funcion || (rangos.includes(p.rango) ? funcionPara(nueva, rangos, p.rango) : "") });
+          movidos++;
+        }
+        destino.division = nueva;
+        writes[rutaNueva] = destino;
+        writes[this.rutaDiv(vieja)] = { division: vieja, policias: [], migradoA: nueva };
+      }
+      for (const [col, docs] of Object.entries(iniciales)) {
+        for (const d of docs) if (!datos[this.rutaDe(col, d.id)]) writes[this.rutaDe(col, d.id)] = d;
+      }
+      const [rr, e] = this.entrada(estado, {
+        tipo: "fecha", titulo: "La aplicación se actualizó a la versión 2",
+        detalle: `Se agregaron FAdeA, SIDE, AFI, Gobierno y opinión pública. Personal reubicado en los nuevos departamentos: ${movidos}.`,
+      });
+      writes[rr] = { ...e, rol: "acuerdo" };
+      return { writes };
+    });
+  }
+
+  // Aplica efectos sobre el estado general y sobre los documentos de personal.
+  _aplicar(efectos, estado, datos, writes) {
+    const generales = efectos.filter((e) => e.tipo !== "personal" && e.tipo !== "doc");
+    const personal = efectos.filter((e) => e.tipo === "personal");
+    const r = aplicarEfectos(estado, generales, estado.fechaJuego);
+    let aplicados = r.aplicados;
+    if (personal.length) {
+      const docs = {};
+      for (const div of divisionesDeEfectos(personal)) {
+        const ruta = this.rutaDiv(div);
+        docs[div] = structuredClone(writes[ruta] || datos[ruta] || { division: div, policias: [] });
+      }
+      const rp = aplicarPersonal(docs, personal, estado.fechaJuego, estado);
+      for (const [div, d] of Object.entries(rp.docs)) writes[this.rutaDiv(div)] = d;
+      aplicados = [...aplicados, ...rp.aplicados];
+    }
+    let nuevo = r.estado;
+    for (const ef of efectos.filter((e) => e.tipo === "doc")) {
+      const ruta = this.rutaDe(ef.col, ef.id);
+      const actual = writes[ruta] || datos[ruta] || null;
+      let despues;
+      if (ef.op === "crear") {
+        exigir(!actual, "Ya existe un registro con ese identificador");
+        despues = { ...ef.datos, id: ef.id, creada: ahora(), fechaJuego: estado.fechaJuego };
+      } else {
+        exigir(actual, "El registro ya no existe");
+        despues = { ...actual, ...ef.cambios, actualizado: estado.fechaJuego };
+      }
+      // Entregas de una orden de FAdeA: suman al inventario de la Fuerza Aérea.
+      let invDelta = 0, aereoId = null;
+      if (ef.col === "ordenes") {
+        const antes = actual?.entregadas || 0, ahora_ = despues.entregadas || 0;
+        exigir(ahora_ >= antes, "Las entregas registradas no pueden bajar");
+        exigir(ahora_ <= despues.cantidad, "No se puede entregar más de lo ordenado");
+        invDelta = ahora_ - antes;
+        aereoId = despues.modelo;
+        if (invDelta > 0) {
+          nuevo = structuredClone(nuevo);
+          let item = nuevo.aereo.find((a) => a.id === aereoId);
+          if (!item) {
+            const m = (nuevo.fadea?.modelos || []).find((x) => x.id === aereoId);
+            exigir(m, "El modelo de la orden no existe");
+            item = { id: m.id, modelo: m.nombre, cantidad: 0, fabricante: "FAdeA", pais: "Argentina", funcion: m.rol || "", referencia: "Diseño original de FAdeA", tipoReferencia: "no_fijada", nota: "" };
+            nuevo.aereo.push(item);
+          }
+          item.cantidad = (typeof item.cantidad === "number" ? item.cantidad : 0) + invDelta;
+        }
+      }
+      writes[ruta] = despues;
+      aplicados.push({ ...ef, antes: actual, despues, invDelta, aereoId });
+    }
+    return { estado: nuevo, aplicados };
+  }
+
+  _revertir(aplicados, estado, datos, writes) {
+    const generales = aplicados.filter((e) => e.tipo !== "personal" && e.tipo !== "doc");
+    const personal = aplicados.filter((e) => e.tipo === "personal");
+    const r = revertirEfectos(estado, generales);
+    let conflictos = r.conflictos;
+    if (personal.length) {
+      const docs = {};
+      for (const div of divisionesDeEfectos(personal)) docs[div] = structuredClone(datos[this.rutaDiv(div)] || { division: div, policias: [] });
+      const rp = revertirPersonal(docs, personal);
+      for (const [div, d] of Object.entries(rp.docs)) writes[this.rutaDiv(div)] = d;
+      conflictos = [...conflictos, ...rp.conflictos];
+    }
+    let nuevo = r.estado;
+    for (const ef of aplicados.filter((e) => e.tipo === "doc").reverse()) {
+      const ruta = this.rutaDe(ef.col, ef.id);
+      const actual = datos[ruta];
+      if (!actual || JSON.stringify(actual) !== JSON.stringify(ef.despues)) { conflictos.push(`${ef.col}: «${ef.despues?.titulo || ef.id}» cambió después; revisalo a mano`); continue; }
+      // Los documentos no se borran: uno creado por la medida anulada queda marcado.
+      writes[ruta] = ef.antes || { ...ef.despues, estado: "Anulado", anulado: true };
+      if (ef.invDelta > 0) {
+        nuevo = structuredClone(nuevo);
+        const item = nuevo.aereo.find((a) => a.id === ef.aereoId);
+        if (item && typeof item.cantidad === "number") item.cantidad = Math.max(0, item.cantidad - ef.invDelta);
+        else conflictos.push("Inventario: no se pudo descontar la entrega anulada");
+      }
+    }
+    return { estado: nuevo, conflictos };
+  }
 
   entrada(estado, { tipo, titulo, detalle = "", refs = {} }) {
     const id = generarId("reg");
@@ -117,7 +257,7 @@ export class Juego {
     exigir(DOMINIOS[dominio], "Elegí el área de autoridad");
     const id = generarId("prop");
     const rutaProp = this.rutaDe("propuestas", id);
-    return this.backend.transact([this.ruta], (datos) => {
+    return this.backend.transact([this.ruta, ...this.rutasPersonal(efectos)], (datos) => {
       const partida = datos[this.ruta];
       exigir(partida, "La partida no existe");
       const estado = partida.estado;
@@ -134,7 +274,7 @@ export class Juego {
       if (decide === this.rol) {
         // Decisión directa dentro de las facultades propias.
         prop.historial.push(this.paso("decision_directa"));
-        nuevoEstado = this._resolverAprobacion(prop, estado, writes);
+        nuevoEstado = this._resolverAprobacion(prop, estado, writes, datos);
       }
       writes[rutaProp] = prop;
       if (nuevoEstado !== estado) writes[this.ruta] = { ...partida, estado: nuevoEstado };
@@ -149,7 +289,7 @@ export class Juego {
   }
 
   // Aprueba una propuesta normal: aplica efectos o abre el pedido de financiamiento.
-  _resolverAprobacion(prop, estado, writes) {
+  _resolverAprobacion(prop, estado, writes, datos) {
     if (prop.requiereFondos) {
       prop.estado = EP.financiamiento;
       const idF = generarId("prop");
@@ -164,7 +304,7 @@ export class Juego {
       prop.financiamientoId = idF;
       return estado;
     }
-    const { estado: nuevo, aplicados } = aplicarEfectos(estado, prop.efectos, estado.fechaJuego);
+    const { estado: nuevo, aplicados } = this._aplicar(prop.efectos, estado, datos, writes);
     prop.efectosAplicados = aplicados;
     prop.estado = EP.aprobada;
     return nuevo;
@@ -174,9 +314,13 @@ export class Juego {
     const rutaProp = this.rutaDe("propuestas", propId);
     const actual = await this.backend.get(rutaProp);
     exigir(actual, "La propuesta no existe");
-    const extra = [];
+    const extra = [...this.rutasPersonal(actual.efectos)];
     if (actual.refId && actual.tipo !== "normal") {
       extra.push(actual.tipo === "voto_guerra" ? this.rutaDe("votaciones", actual.refId) : this.rutaDe("propuestas", actual.refId));
+      if (actual.tipo !== "voto_guerra") {
+        const original = await this.backend.get(this.rutaDe("propuestas", actual.refId));
+        extra.push(...this.rutasPersonal(actual.tipo === "anulacion" ? original?.efectosAplicados : original?.efectos));
+      }
     }
     return this.backend.transact([this.ruta, rutaProp, ...extra], (datos) => {
       const partida = datos[this.ruta];
@@ -192,14 +336,14 @@ export class Juego {
       if (accion === "devolver") {
         prop.estado = EP.devuelta;
       } else if (prop.tipo === "normal") {
-        if (accion === "aprobar") estado = this._resolverAprobacion(prop, estado, writes);
+        if (accion === "aprobar") estado = this._resolverAprobacion(prop, estado, writes, datos);
         else prop.estado = EP.rechazada;
       } else if (prop.tipo === "financiamiento") {
         const ruta = this.rutaDe("propuestas", prop.refId);
         const original = structuredClone(datos[ruta]);
         exigir(original && original.estado === EP.financiamiento, "La medida original ya no espera financiamiento");
         if (accion === "aprobar") {
-          const r = aplicarEfectos(estado, original.efectos, estado.fechaJuego);
+          const r = this._aplicar(original.efectos, estado, datos, writes);
           estado = r.estado;
           original.efectosAplicados = r.aplicados;
           original.estado = EP.aprobada;
@@ -229,7 +373,7 @@ export class Juego {
         const original = structuredClone(datos[ruta]);
         exigir(original && [EP.aprobada, EP.financiamiento, EP.bloqueada].includes(original.estado), "La medida ya no se puede anular");
         if (accion === "aprobar") {
-          const r = revertirEfectos(estado, original.efectosAplicados || []);
+          const r = this._revertir(original.efectosAplicados || [], estado, datos, writes);
           estado = r.estado;
           prop.conflictos = r.conflictos;
           original.estado = EP.anulada;
@@ -327,6 +471,60 @@ export class Juego {
       };
       const [rr, e] = this.entrada(estado, { tipo: "propuesta", titulo: `Pedido de anulación: ${original.titulo}`, detalle: justificacion, refs: { propuestaId: id } });
       return { writes: { [this.rutaDe("propuestas", id)]: prop, [rr]: e }, result: { id } };
+    });
+  }
+
+  // ---------- personal de la PFA ----------
+
+  // Carga masiva de altas. Solo el Jefe del Estado Mayor, que conduce la PFA.
+  // Queda en el registro como un único movimiento; no se anula como propuesta.
+  async cargaMasiva(filas, titulo = "Carga masiva de personal") {
+    exigir(this.rol === "jemc", "La carga masiva de personal la hace el Jefe del Estado Mayor Conjunto");
+    exigir(filas.length > 0, "No hay filas para cargar");
+    const efectos = filas.map((f) => ({
+      tipo: "personal", op: "alta", division: f.division,
+      policia: { id: generarId("pol"), nombre: f.nombre, rango: f.rango, funcion: f.funcion || "", notas: f.notas || "" },
+    }));
+    return this.backend.transact([this.ruta, ...this.rutasPersonal(efectos)], (datos) => {
+      const estado = datos[this.ruta].estado;
+      const writes = {};
+      this._aplicar(efectos, estado, datos, writes);
+      const porDivision = {};
+      for (const e of efectos) porDivision[e.division] = (porDivision[e.division] || 0) + 1;
+      const detalle = Object.entries(porDivision).map(([d, n]) => `${nombreUnidad(estado, d)}: ${n}`).join("; ");
+      const [rr, e] = this.entrada(estado, { tipo: "decision", titulo: `${titulo}: ${filas.length} altas`, detalle });
+      writes[rr] = e;
+      return { writes, result: { cantidad: filas.length } };
+    });
+  }
+
+  async generarPlantel(unidadId, cantidad) {
+    const inst = instDeUnidad(unidadId);
+    exigir(Number.isInteger(cantidad) && cantidad > 0 && cantidad <= 5000, "Elegí una cantidad entre 1 y 5.000");
+    const existentes = new Set(this.personal.flatMap((d) => (d.policias || []).map((p) => p.nombre)));
+    const yaHayJefe = (this.personal.find((d) => d.id === unidadId)?.policias || []).some((p) => /^jefe de departamento/i.test(p.funcion || ""));
+    const filas = generarPlantel({ inst, unidadId, rangos: INSTITUCIONES[inst].rangos, cantidad, existentes, conJefe: !yaHayJefe });
+    return this.cargaMasiva(filas, `Plantel generado (${INSTITUCIONES[inst].corto})`);
+  }
+
+  // Reemplaza todos los nombres de una institución por nombres generados.
+  async renombrarTodos(inst) {
+    exigir(this.rol === "jemc", "Solo el Jefe del Estado Mayor Conjunto puede renombrar al personal");
+    const rutas = (this.estado.unidades[inst] || []).map((u) => this.rutaDiv(u.id));
+    return this.backend.transact([this.ruta, ...rutas], (datos) => {
+      const writes = {};
+      let total = 0;
+      for (const r of rutas) {
+        const doc = datos[r];
+        if (!doc?.policias?.length) continue;
+        const nombres = generarNombresUnicos(doc.policias.length);
+        writes[r] = { ...doc, policias: doc.policias.map((p, i) => ({ ...p, nombre: nombres[i] })) };
+        total += doc.policias.length;
+      }
+      exigir(total, "No hay personal para renombrar");
+      const [rr, e] = this.entrada(datos[this.ruta].estado, { tipo: "decision", titulo: `Nombres regenerados en ${INSTITUCIONES[inst].corto}: ${total} registros` });
+      writes[rr] = e;
+      return { writes, result: { total } };
     });
   }
 
@@ -455,7 +653,7 @@ export class Juego {
     return this.backend.transact([this.ruta], (datos) => {
       const estado = datos[this.ruta].estado;
       const anterior = this.informes[0] || null;
-      const informe = construirInforme({ estado, propuestas: this.propuestas, registro: this.registro, votaciones: this.votaciones, desde: anterior?.creada || null });
+      const informe = construirInforme({ estado, propuestas: this.propuestas, registro: this.registro, votaciones: this.votaciones, personal: this.personal, desde: anterior?.creada || null });
       const doc = { id, ...informe, generadoPor: this.rol, creada: ahora(), fecha: ahora(), fechaJuego: estado.fechaJuego };
       const [rr, e] = this.entrada(estado, { tipo: "informe", titulo: doc.titulo });
       return { writes: { [this.rutaDe("informes", id)]: doc, [rr]: e }, result: { id } };

@@ -3,6 +3,8 @@ rules_version = '2';
 // - Solo dispositivos con sesión anónima de Firebase pueden leer o escribir.
 // - No se puede listar partidas: hay que conocer el código de invitación.
 // - Nada se borra: el historial se conserva.
+// - Cualquier colección dentro de una partida queda habilitada, así las
+//   actualizaciones futuras de la app no requieren cambiar estas reglas.
 service cloud.firestore {
   match /databases/{database}/documents {
     match /partidas/{codigo} {
@@ -11,8 +13,7 @@ service cloud.firestore {
       allow list, delete: if false;
 
       match /{coleccion}/{docId} {
-        allow read, create, update: if request.auth != null
-          && coleccion in ['propuestas', 'asuntos', 'votaciones', 'registro', 'informes'];
+        allow read, create, update: if request.auth != null;
         allow delete: if false;
       }
     }
