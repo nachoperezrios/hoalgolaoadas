@@ -2,8 +2,65 @@
 // decisiones, inventarios, proyectos e historial quedan como estaban.
 
 import { DEPARTAMENTOS_PFA } from "./reglas.js";
+import { generarNombresUnicos } from "./nombres.js";
+import { AREAS_PRESUPUESTO, AREAS_JEMC } from "./simulacion.js";
 
-export const VERSION_ACTUAL = 2;
+export const VERSION_ACTUAL = 3;
+
+// Bancas reales de Diputados por distrito (257 en total); el Senado tiene 3 por distrito.
+const BANCAS_DIPUTADOS = {
+  "Buenos Aires": 70, "Ciudad Autónoma de Buenos Aires": 25, "Santa Fe": 19, "Córdoba": 18, "Mendoza": 10, "Tucumán": 9, "Entre Ríos": 9,
+  "Salta": 7, "Chaco": 7, "Corrientes": 7, "Misiones": 7, "Santiago del Estero": 7, "San Juan": 6, "Jujuy": 6,
+  "Río Negro": 5, "Neuquén": 5, "Formosa": 5, "Chubut": 5, "San Luis": 5, "Catamarca": 5, "La Rioja": 5, "La Pampa": 5, "Santa Cruz": 5, "Tierra del Fuego": 5,
+};
+const PATAGONIA = ["Neuquén", "Río Negro", "Chubut", "Santa Cruz", "Tierra del Fuego"];
+
+// Bloques iniciales ficticios: el oficialismo arranca con mayoría propia en las dos cámaras.
+const BLOQUES_INICIALES = {
+  D: [["lyp", "Libertad y Progreso", 135, "Oficialista"], ["ffp", "Frente Federal Popular", 70, "Opositor"], ["adi", "Alianza del Interior", 22, "Independiente"],
+    ["msu", "Movimiento Social Unido", 18, "Opositor"], ["bpa", "Bloque Patagónico", 12, "Aliado"]],
+  S: [["lyp", "Libertad y Progreso", 38, "Oficialista"], ["ffp", "Frente Federal Popular", 20, "Opositor"], ["adi", "Alianza del Interior", 7, "Independiente"],
+    ["msu", "Movimiento Social Unido", 4, "Opositor"], ["bpa", "Bloque Patagónico", 3, "Aliado"]],
+};
+
+function mezclar(lista, rand = Math.random) {
+  const a = [...lista];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+export function generarLegisladores(congreso, rand = Math.random) {
+  const nombres = generarNombresUnicos(257 + 72, rand);
+  let k = 0;
+  const out = [];
+  for (const camara of ["D", "S"]) {
+    const bloques = camara === "D" ? congreso.bloquesDiputados : congreso.bloquesSenado;
+    const bancas = Object.entries(BANCAS_DIPUTADOS).flatMap(([prov, n]) => Array(camara === "D" ? n : 3).fill(prov));
+    let libres = mezclar(bancas, rand);
+    const total = libres.length;
+    const orden = [...bloques].sort((x, y) => (/patag/i.test(y.nombre) ? 1 : 0) - (/patag/i.test(x.nombre) ? 1 : 0));
+    for (const b of orden) {
+      let cupo = Math.max(0, Math.round(Number(b.bancas) || 0));
+      // Un bloque patagónico toma sus bancas en la Patagonia.
+      const preferidas = /patag/i.test(b.nombre) ? libres.filter((p) => PATAGONIA.includes(p)) : [];
+      for (const prov of preferidas) {
+        if (!cupo) break;
+        libres.splice(libres.indexOf(prov), 1);
+        out.push({ id: `leg-${camara}-${k}`, camara, nombre: nombres[k++], provincia: prov, bloque: b.id }); cupo--;
+      }
+      while (cupo-- > 0 && libres.length) out.push({ id: `leg-${camara}-${k}`, camara, nombre: nombres[k++], provincia: libres.shift(), bloque: b.id });
+    }
+    if (libres.length) {
+      const id = camara === "D" ? "sin-bloque-d" : "sin-bloque-s";
+      bloques.push({ id, nombre: "Sin bloque", bancas: libres.length, postura: "Independiente" });
+      for (const prov of libres) out.push({ id: `leg-${camara}-${k}`, camara, nombre: nombres[k++], provincia: prov, bloque: id });
+    }
+    const asignadas = out.filter((l) => l.camara === camara).length;
+    for (const b of bloques) b.bancas = out.filter((l) => l.camara === camara && l.bloque === b.id).length;
+    if (asignadas !== total) throw new Error("Error al repartir bancas");
+  }
+  return out;
+}
 
 // Divisiones de la versión 1 -> departamentos de la versión 2.
 export const MAPA_DIVISIONES = {
@@ -28,7 +85,7 @@ const CARGOS_GABINETE = [
   ["salud", "Ministerio de Salud"], ["trabajo", "Ministerio de Trabajo"],
 ];
 
-const slug = (t) => String(t).toLowerCase().normalize("NFD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const slug = (t) => String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 export function migrarEstado(estadoV1) {
   const e = JSON.parse(JSON.stringify(estadoV1));
@@ -79,6 +136,46 @@ export function migrarEstado(estadoV1) {
 
   e.relaciones = e.relaciones.map((r) => ({ id: r.id || slug(r.pais), ...r }));
   e.tratados ||= [];
+
+  // ---------- versión 3 ----------
+  e.indicadores.recaudacion ||= { nombre: "Recaudación anual", unidad: "US$ millones", valor: null, fechaCarga: null };
+  e.economia.medidas ||= [];
+  e.economia.historial ||= [];
+  e.areas ||= Object.fromEntries(AREAS_JEMC.map((a) => [a, { moral: 70 }]));
+  e.presupuesto ||= {
+    borrador: Object.fromEntries(Object.keys(AREAS_PRESUPUESTO).map((a) => [a, null])),
+    pedidos: Object.fromEntries(AREAS_JEMC.map((a) => [a, null])),
+    vigente: null, leyId: null,
+  };
+  e.comunicacion ||= { ultimaCadena: null };
+  e.bcra ||= { tesoro: null, dolar: null, tasa: null, baseMonetaria: null };
+  e.arca ||= { alicuotas: { iva: null, gananciasSociedades: null, gananciasPersonas: null, retencionesAgro: null, retencionesIndustriales: null, cheque: null, bienesPersonales: null } };
+  e.escudos.bcra ??= null;
+  e.escudos.arca ??= null;
+  for (const p of e.provincias) {
+    p.ajusteAprobacion ??= 0;
+    // Corrige identificadores mal armados por versiones anteriores (tildes).
+    if (p.id !== slug(p.nombre) && !e.provincias.some((q) => q.id === slug(p.nombre))) p.id = slug(p.nombre);
+  }
+  for (const r of e.relaciones) if (r.id !== slug(r.pais) && !e.relaciones.some((q) => q.id === slug(r.pais))) r.id = slug(r.pais);
+
+  // Gabinete: Secretaría General de la Presidencia y nombres inventados en los cargos vacíos.
+  if (!e.gabinete.some((g) => g.id === "secretaria-general")) {
+    e.gabinete.unshift({ id: "secretaria-general", cargo: "Secretaría General de la Presidencia", titular: "Anastacio Montiel", estado: "En funciones", notas: "" });
+  }
+  const sinGobernador = e.provincias.filter((p) => !p.gobernador);
+  generarNombresUnicos(sinGobernador.length).forEach((n, i) => { sinGobernador[i].gobernador = n; });
+  const vacios = e.gabinete.filter((g) => !g.titular);
+  const nombres = generarNombresUnicos(vacios.length);
+  vacios.forEach((g, i) => { g.titular = nombres[i]; g.estado ||= "En funciones"; });
+
+  // Congreso: bloques iniciales con mayoría propia (si los jugadores no cargaron los suyos) y legisladores con nombre.
+  const c = e.congreso;
+  if (!c.legisladores) {
+    if (!c.bloquesDiputados.length) c.bloquesDiputados = BLOQUES_INICIALES.D.map(([id, nombre, bancas, postura]) => ({ id: `${id}-d`, nombre, bancas, postura }));
+    if (!c.bloquesSenado.length) c.bloquesSenado = BLOQUES_INICIALES.S.map(([id, nombre, bancas, postura]) => ({ id: `${id}-s`, nombre, bancas, postura }));
+    c.legisladores = generarLegisladores(c);
+  }
 
   return e;
 }

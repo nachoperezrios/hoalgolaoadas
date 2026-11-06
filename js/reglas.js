@@ -1,3 +1,4 @@
+import { aplicarEfectosSimples } from "./simulacion.js";
 // Reglas puras del juego. Sin acceso a red ni al DOM: se testean en Node.
 
 export const ROLES = {
@@ -17,6 +18,8 @@ export const DOMINIOS = {
   fadea: { nombre: "FAdeA: producción, plantas, fichas y filtraciones", decide: "jemc" },
   compras_militares: { nombre: "Compras y presupuesto militar, órdenes y nuevos modelos de FAdeA", decide: "presidente" },
   decretos: { nombre: "Decretos: ascensos al rango máximo y jefaturas", decide: "presidente" },
+  carga_inicial: { nombre: "Carga inicial de datos vacíos", decide: "cualquiera" },
+  ley_congreso: { nombre: "Requiere ley del Congreso", decide: "congreso" },
   economia: { nombre: "Economía, impuestos y presupuesto", decide: "presidente" },
   politica: { nombre: "Política nacional y provincias", decide: "presidente" },
   infraestructura: { nombre: "Infraestructura, vivienda, ferrocarriles y puertos", decide: "presidente" },
@@ -128,7 +131,33 @@ export const MAX_POR_DIVISION = 5000;
 // ---------- Efectos sobre el estado ----------
 // Cada efecto declara qué dominio hace falta para aplicarlo.
 
+const DOMINIOS_PRESIDENTE = new Set(["economia", "politica", "exteriores", "infraestructura"]);
+const RUTAS_CARGA_INICIAL = /^(bcra\.|arca\.alicuotas\.|gobierno\.opinionPublica\.aprobacion$)/;
+const LISTAS_CARGA_INICIAL = new Set(["provincias", "gabinete", "relaciones", "tratados", "congreso.bloquesDiputados", "congreso.bloquesSenado"]);
+const vacioV = (v) => v === null || v === undefined || v === "";
+function leerRuta(estado, ruta) { return ruta.split(".").reduce((o, k) => (o == null ? undefined : o[k]), estado); }
+
+// Un dato vacío del Presidente lo puede cargar cualquiera; después, cambiarlo es decisión suya.
+function esCargaInicial(ef, estado) {
+  if (!estado) return false;
+  if (ef.tipo === "indicador") return vacioV(estado.indicadores?.[ef.clave]?.valor);
+  if (ef.tipo === "dato") return RUTAS_CARGA_INICIAL.test(ef.ruta) && vacioV(leerRuta(estado, ef.ruta));
+  if (ef.tipo === "lista" && ef.op === "editar" && LISTAS_CARGA_INICIAL.has(ef.ruta)) {
+    const item = (leerRuta(estado, ef.ruta) || []).find((x) => x.id === ef.id);
+    return !!item && Object.keys(ef.cambios || {}).every((k) => vacioV(item[k]));
+  }
+  return false;
+}
+
 export function dominioRequerido(efecto, estado) {
+  const d = dominioBase(efecto, estado);
+  if (DOMINIOS_PRESIDENTE.has(d) && esCargaInicial(efecto, estado)) return "carga_inicial";
+  // Las alícuotas ya cargadas solo cambian por ley del Congreso.
+  if (efecto.tipo === "dato" && /^arca\.alicuotas\./.test(efecto.ruta)) return "ley_congreso";
+  return d;
+}
+
+function dominioBase(efecto, estado) {
   const ef = efecto;
   switch (efecto.tipo) {
     case "proyecto_estado": {
@@ -156,6 +185,7 @@ export function dominioRequerido(efecto, estado) {
     case "atlas_alta":
       return "atlas";
     case "personal": {
+      if (ef.op === "condecorar") return "decretos";
       const inst = ef.inst || instDeUnidad(ef.division);
       const p = ef.op === "alta" ? ef.policia : ef.op === "editar" ? ef.cambios || {} : {};
       if (requiereDecreto(inst, p.rango, p.funcion)) return "decretos";
@@ -179,16 +209,23 @@ export function dominioRequerido(efecto, estado) {
       return typeof d === "function" ? d(ef, estado) : d;
     }
     case "opinion":
+    case "simples":
       return null;
+    case "medida":
+      return "economia";
     default:
       return null;
   }
 }
 
 // ¿Qué rol tiene que decidir una propuesta? El de mayor exigencia entre sus efectos.
-export function rolQueDecide(dominio, efectos, estado) {
+export function rolQueDecide(dominio, efectos, estado, actor = "presidente") {
   const necesarios = new Set([dominio, ...efectos.map((e) => dominioRequerido(e, estado)).filter(Boolean)]);
-  const roles = new Set([...necesarios].map(decideDominio));
+  if (necesarios.has("ley_congreso")) throw new Error("Este cambio requiere una ley del Congreso");
+  // Una carga inicial la hace cualquiera; si la propuesta solo carga datos vacíos, decide quien la carga.
+  if (efectos.length && efectos.every((e) => ["carga_inicial", null].includes(dominioRequerido(e, estado))) && (!dominio || dominio === "carga_inicial" || decideDominio(dominio) === actor)) return actor;
+  const roles = new Set([...necesarios].filter((d) => d !== "carga_inicial").map(decideDominio));
+  if (!roles.size) return actor;
   if (roles.size === 1) return [...roles][0];
   // Si mezcla facultades de los dos cargos, la decisión final es presidencial
   // (decisiones estratégicas finales) y queda registrada.
@@ -284,6 +321,17 @@ export function aplicarEfectos(estadoActual, efectos, fechaJuego) {
         aplicados.push({ ...ef, antes });
         break;
       }
+      case "medida": {
+        estado.economia.medidas ||= [];
+        estado.economia.medidas.push({ ...ef.medida, restante: ef.medida.meses, inicio: fechaJuego });
+        aplicados.push({ ...ef, antes: null });
+        break;
+      }
+      case "simples": {
+        aplicarEfectosSimples(estado, ef.efectos, ef.provinciaId || null);
+        aplicados.push({ ...ef, antes: null });
+        break;
+      }
       case "atlas_alta": {
         if (estado.atlas.miembros.some((x) => x.pais === ef.pais)) throw new Error(`${ef.pais} ya es miembro`);
         estado.atlas.miembros.push({ pais: ef.pais, aporte: ef.aporte || "Aporte no definido" });
@@ -354,6 +402,15 @@ export function revertirEfectos(estadoActual, aplicados) {
         }
         break;
       }
+      case "medida": {
+        const antes = (estado.economia.medidas || []).length;
+        estado.economia.medidas = (estado.economia.medidas || []).filter((m) => m.id !== ef.medida.id);
+        if (estado.economia.medidas.length === antes) marcarConflicto(`La medida «${ef.medida.nombre}» ya terminó: sus efectos no se revierten`);
+        break;
+      }
+      case "simples":
+        marcarConflicto("Los efectos de crisis o eventos ya aplicados no se revierten automáticamente");
+        break;
       case "opinion": {
         if (ef.sinEfecto) break;
         const op = estado.gobierno.opinionPublica;
@@ -399,6 +456,10 @@ export function describirEfecto(ef, estado) {
       return `${COLECCIONES_DOC[ef.col]?.nombre || ef.col}: ${ef.op === "crear" ? "alta de" : "cambios en"} «${ef.titulo || ef.datos?.titulo || ef.id}»`;
     case "opinion":
       return `Opinión pública: ${ef.delta > 0 ? "+" : ""}${String(ef.delta).replace(".", ",")} puntos`;
+    case "medida":
+      return `Medida económica: ${ef.medida.nombre} (${ef.medida.meses} ${ef.medida.meses === 1 ? "mes" : "meses"})`;
+    case "simples":
+      return `Consecuencias: ${ef.descripcion || "efectos de la decisión"}`;
     default:
       return ef.tipo;
   }
@@ -487,6 +548,7 @@ export function describirPersonal(ef, estado) {
     }
     case "baja": return `Baja de ${nombre}`;
     case "reincorporar": return `Reincorporación de ${nombre}`;
+    case "condecorar": return `${ef.medalla} para ${nombre}`;
     default: return "Cambio de personal";
   }
 }
@@ -537,6 +599,9 @@ export function aplicarPersonal(docs, efectos, fechaJuego, estado = null) {
     } else if (ef.op === "reincorporar") {
       if (antes.estado !== "Baja") throw new Error(`${antes.nombre} está activo`);
       despues.estado = "Activo";
+    } else if (ef.op === "condecorar") {
+      if (antes.estado !== "Activo") throw new Error("Solo se condecora a personal activo");
+      despues.condecoraciones = [...(antes.condecoraciones || []), { medalla: ef.medalla, fecha: fechaJuego }];
     } else throw new Error(`Operación inválida: ${ef.op}`);
     origen.policias.splice(i, 1);
     doc(destino).policias.push(despues);
@@ -610,7 +675,13 @@ export const DATOS_EDITABLES = [
   { patron: /^fadea\.presupuestoAnual$/, dominio: "compras_militares" },
   { patron: /^gobierno\.opinionPublica\.aprobacion$/, dominio: "politica" },
   { patron: /^escudos\.(pfa|side|afi)$/, dominio: (m) => m[1] },
+  { patron: /^escudos\.(bcra|arca)$/, dominio: "economia" },
   { patron: /^atlas\.presupuestoAnual$/, dominio: "atlas" },
+  { patron: /^presupuesto\.borrador\.([a-z]+)$/, dominio: "economia" },
+  { patron: /^comunicacion\.ultimaCadena$/, dominio: "politica" },
+  { patron: /^bcra\.(tesoro|dolar|tasa|baseMonetaria)$/, dominio: "economia" },
+  { patron: /^arca\.alicuotas\.([A-Za-z]+)$/, dominio: "economia" },
+  { patron: /^presupuesto\.pedidos\.([a-z]+)$/, dominio: (m) => ({ fuerzas: "fuerzas", atlas: "atlas", fadea: "fadea", pfa: "pfa", side: "side", afi: "afi" })[m[1]] || "economia" },
 ];
 
 export function ETIQUETAS_RUTA(ruta, estado) {
@@ -620,6 +691,9 @@ export function ETIQUETAS_RUTA(ruta, estado) {
     return `Ficha de ${nombre}, ${CAMPOS_FICHA[m[2]] || m[2]}`;
   }
   if ((m = ruta.match(/^at1\.ficha\.([A-Za-z]+)$/))) return `AT-1, ${CAMPOS_FICHA_AT1[m[1]] || m[1]}`;
+  if ((m = ruta.match(/^arca\.alicuotas\.([A-Za-z]+)$/))) return `ARCA, ${ALICUOTAS[m[1]]?.nombre || m[1]}`;
+  if ((m = ruta.match(/^bcra\.([A-Za-z]+)$/))) return `Banco Central, ${DATOS_BCRA[m[1]]?.nombre || m[1]}`;
+  if ((m = ruta.match(/^presupuesto\.(borrador|pedidos)\.([a-z]+)$/))) return `${m[1] === "borrador" ? "Presupuesto propuesto" : "Pedido de fondos"}: ${NOMBRES_AREA[m[2]] || m[2]}`;
   return { "fadea.presupuestoAnual": "Presupuesto anual de FAdeA", "gobierno.opinionPublica.aprobacion": "Aprobación del gobierno",
     "escudos.pfa": "Escudo de la PFA", "escudos.side": "Escudo de la SIDE", "escudos.afi": "Escudo de la AFI", "atlas.presupuestoAnual": "Presupuesto de ATLAS" }[ruta] || ruta;
 }
@@ -646,6 +720,7 @@ export const LISTAS_EDITABLES = {
   tratados: { nombre: "Tratados", dominio: "exteriores" },
   "congreso.bloquesDiputados": { nombre: "Bloques de Diputados", dominio: "politica" },
   "congreso.bloquesSenado": { nombre: "Bloques del Senado", dominio: "politica" },
+  "congreso.legisladores": { nombre: "Legisladores", dominio: "politica" },
   "unidades.pfa": { nombre: "Departamentos de la PFA", dominio: "pfa" },
   "unidades.side": { nombre: "Departamentos de la SIDE", dominio: "side" },
   "unidades.afi": { nombre: "Departamentos de la AFI", dominio: "afi" },
@@ -656,7 +731,30 @@ export const COLECCIONES_DOC = {
   filtraciones: { nombre: "Filtración de datos", crear: "fadea", editar: "fadea" },
   inteligencia: { nombre: "Inteligencia", crear: (ef) => ef.inst || ef.datos?.inst, editar: (ef) => ef.inst },
   leyes: { nombre: "Proyecto de ley", crear: "politica", editar: "politica" },
+  obras: { nombre: "Obra pública", crear: "infraestructura", editar: "infraestructura" },
+  crisis: { nombre: "Crisis", crear: "politica", editar: (ef) => ef.apoyo || "politica" },
+  auditorias: { nombre: "Auditoría", crear: "politica", editar: "politica" },
+  comunicados: { nombre: "Comunicación oficial", crear: "politica", editar: "politica" },
 };
+const NOMBRES_AREA = { fuerzas: "Fuerzas Armadas", atlas: "Aporte a ATLAS", fadea: "FAdeA", pfa: "PFA", side: "SIDE", afi: "AFI", obras: "Obras públicas", social: "Desarrollo social", educacion: "Educación", salud: "Salud", otros: "Resto de la administración" };
+// Datos del Banco Central (las reservas son el indicador «reservas»).
+export const DATOS_BCRA = {
+  tesoro: { nombre: "Depósitos del Tesoro", unidad: "US$ millones" },
+  dolar: { nombre: "Cotización del dólar oficial", unidad: "$ por US$" },
+  tasa: { nombre: "Tasa de política monetaria", unidad: "% anual" },
+  baseMonetaria: { nombre: "Base monetaria", unidad: "$ millones" },
+};
+// Alícuotas de ARCA. `peso`: variación % de la recaudación por punto de alícuota (regla del juego).
+export const ALICUOTAS = {
+  iva: { nombre: "IVA", peso: 2.5 },
+  gananciasSociedades: { nombre: "Ganancias de sociedades", peso: 0.6 },
+  gananciasPersonas: { nombre: "Ganancias de personas", peso: 0.5 },
+  retencionesAgro: { nombre: "Retenciones al agro", peso: 0.4 },
+  retencionesIndustriales: { nombre: "Retenciones industriales", peso: 0.2 },
+  cheque: { nombre: "Impuesto al cheque", peso: 3 },
+  bienesPersonales: { nombre: "Bienes Personales", peso: 0.8 },
+};
+export const MEDALLAS = ["Medalla al Valor", "Orden al Mérito Federal", "Distinción por Servicio Distinguido", "Cruz de Honor"];
 
 // Impacto en la opinión pública de una filtración que trasciende.
 export const IMPACTO_FILTRACION = { Baja: -1, Media: -3, Alta: -5, "Crítica": -8 };

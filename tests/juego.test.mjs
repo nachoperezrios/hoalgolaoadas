@@ -273,7 +273,7 @@ const alta = (division, nombre, rango, funcion = "") => ({ tipo: "personal", op:
 
 test("partida nueva: 6 departamentos PFA, SIDE y AFI, FAdeA y gobierno", async () => {
   const { jemc } = await armar();
-  assert.equal(jemc.partida.version, 2);
+  assert.equal(jemc.partida.version, 3);
   assert.deepEqual(jemc.estado.unidades.pfa.map((u) => u.numero), [1, 2, 3, 4, 5, 6]);
   assert.equal(jemc.estado.unidades.pfa[4].nombre, "Departamento de Cibercrimen");
   assert.equal(jemc.estado.fadea.modelos.length, 4);
@@ -297,7 +297,7 @@ test("migración: una partida de la versión 1 conserva su progreso y reubica al
   const j = new Juego(b, "VIEJ-A123", "jemc");
   j.conectar(() => {});
   await esperar(); await esperar(); await esperar();
-  assert.equal(j.partida.version, 2);
+  assert.equal(j.partida.version, 3);
   assert.equal(j.estado.aereo.find((a) => a.id === "f14").cantidad, 340);
   assert.equal(policias(j, "pfa-1")[0].nombre, "Ana Uno");
   assert.ok(policias(j, "pfa-1")[0].funcion);
@@ -305,7 +305,7 @@ test("migración: una partida de la versión 1 conserva su progreso y reubica al
   assert.equal(policias(j, "side-general")[0].nombre, "Ceci Tres");
   assert.equal(policias(j, "uate").length, 0);
   assert.ok(j.propuestas.some((p) => p.id === "prop-1"));
-  assert.ok(j.registro.some((r) => r.titulo.includes("versión 2")));
+  assert.ok(j.registro.some((r) => r.titulo.includes("versión 3")));
   // Segunda migración: no hace nada
   await j.migrar();
   await esperar();
@@ -462,4 +462,189 @@ test("el informe cuenta efectivos activos", async () => {
   const seg = jemc.informes[0].secciones.find((s) => s.id === "seguridad");
   assert.ok(seg.hechos.some((h) => h.includes("la PFA: 1 efectivo activo")));
   assert.ok(seg.hechos.some((h) => h.includes("la AFI: 1 efectivo activo")));
+});
+
+// ---------- Versión 3 ----------
+const cargarIndicadores = async (pres) => {
+  const vals = { inflacion: 30, crecimiento: 2, desempleo: 7, pobreza: 30, reservas: 40000, riesgoPais: 800, recaudacion: 120000 };
+  await pres.proponer({ titulo: "Indicadores iniciales", dominio: "economia", efectos: [
+    ...Object.entries(vals).map(([clave, valor]) => ({ tipo: "indicador", clave, valor })),
+    { tipo: "dato", ruta: "gobierno.opinionPublica.aprobacion", valor: 50 },
+  ] });
+  await esperar();
+};
+
+test("v3: Congreso con 329 legisladores, gabinete completo con Anastacio Montiel", async () => {
+  const { jemc } = await armar();
+  const e = jemc.estado;
+  assert.equal(e.congreso.legisladores.length, 329);
+  assert.equal(e.congreso.bloquesDiputados.find((b) => b.postura === "Oficialista").bancas, 135);
+  const sg = e.gabinete.find((g) => g.id === "secretaria-general");
+  assert.equal(sg.titular, "Anastacio Montiel");
+  assert.ok(e.gabinete.every((g) => g.titular));
+});
+
+test("v3: migración desde la v2 conserva nombres y bloques cargados", async () => {
+  const almacen = new Almacen();
+  const b = crearBackendMemoria(almacen, "uid-jemc");
+  const { migrarEstado } = await import("../js/migracion.js");
+  const e2 = migrarEstado(estadoInicial());
+  // Simular una partida v2: sin estructuras de la v3 y con datos propios
+  delete e2.congreso.legisladores; delete e2.areas; delete e2.presupuesto; delete e2.indicadores.recaudacion;
+  e2.gabinete = e2.gabinete.filter((g) => g.id !== "secretaria-general").map((g) => ({ ...g, titular: g.id === "defensa" ? "Nombre Propio" : "" }));
+  e2.congreso.bloquesDiputados = [{ id: "mio", nombre: "Mi Bloque", bancas: 200, postura: "Oficialista" }];
+  e2.congreso.bloquesSenado = [];
+  almacen.confirmar({}, { "partidas/VDOS-A123": { codigo: "VDOS-A123", nombre: "v2", version: 2, jugadores: { jemc: { uid: "uid-jemc", pin: "1" }, presidente: null }, estado: e2 } });
+  const j = new Juego(b, "VDOS-A123", "jemc");
+  j.conectar(() => {});
+  await esperar(); await esperar(); await esperar();
+  assert.equal(j.partida.version, 3);
+  assert.equal(j.estado.gabinete.find((g) => g.id === "defensa").titular, "Nombre Propio");
+  assert.equal(j.estado.gabinete[0].titular, "Anastacio Montiel");
+  assert.equal(j.estado.congreso.bloquesDiputados.find((x) => x.id === "mio").bancas, 200);
+  assert.equal(j.estado.congreso.bloquesDiputados.find((x) => x.nombre === "Sin bloque").bancas, 57);
+  assert.equal(j.estado.congreso.legisladores.filter((l) => l.camara === "S").length, 72);
+});
+
+test("v3: medida económica y turno mensual", async () => {
+  const { jemc, pres } = await armar();
+  await cargarIndicadores(pres);
+  const r = await pres.proponer({ titulo: "Ajuste", dominio: "economia", efectos: [{ tipo: "medida", medida: { id: "m1", tipo: "ajuste_gasto", nombre: "Ajuste del gasto público", meses: 2 } }] });
+  assert.equal(r.estado, EP.aprobada);
+  await esperar();
+  await jemc.avanzarMes(jemc.estado.fechaJuego);
+  await esperar();
+  assert.equal(pres.estado.fechaJuego, "2030-01-08");
+  assert.ok(pres.estado.indicadores.inflacion.valor < 30);
+  assert.equal(pres.estado.economia.medidas[0].restante, 1);
+  await assert.rejects(pres.avanzarMes("2029-12-08"), /ya avanzó/);
+  await pres.avanzarMes(pres.estado.fechaJuego);
+  await esperar();
+  assert.equal(pres.estado.economia.medidas.length, 0);
+  assert.equal(pres.estado.economia.historial.length, 2);
+});
+
+test("v3: turno mensual sin indicadores cargados no falla", async () => {
+  const { jemc } = await armar();
+  await jemc.avanzarMes();
+  await esperar();
+  assert.equal(jemc.estado.fechaJuego, "2030-01-08");
+});
+
+test("v3: presupuesto: pedido del Jefe, reparto del Presidente, Congreso y moral", async () => {
+  const { jemc, pres } = await armar();
+  await cargarIndicadores(pres);
+  const pedido = await jemc.proponer({ titulo: "Pedido PFA", dominio: "pfa", efectos: [{ tipo: "dato", ruta: "presupuesto.pedidos.pfa", valor: 1000 }] });
+  assert.equal(pedido.decide, "jemc");
+  await assert.rejects(jemc.enviarPresupuesto(), /Presidente/);
+  await pres.proponer({ titulo: "Borrador", dominio: "economia", efectos: [
+    { tipo: "dato", ruta: "presupuesto.borrador.pfa", valor: 400 }, { tipo: "dato", ruta: "presupuesto.borrador.fadea", valor: 900 }, { tipo: "dato", ruta: "presupuesto.borrador.obras", valor: 1200 },
+  ] });
+  await esperar();
+  const { id } = await pres.enviarPresupuesto();
+  await esperar();
+  const r1 = await pres.votarLey(id);
+  assert.equal(r1.estado, "Media sanción");
+  const r2 = await pres.votarLey(id);
+  assert.equal(r2.estado, "Sancionada");
+  await esperar();
+  assert.equal(jemc.estado.presupuesto.vigente.pfa, 400);
+  assert.equal(jemc.estado.fadea.presupuestoAnual, 900);
+  const moral0 = jemc.estado.areas.pfa.moral;
+  await jemc.avanzarMes(); await esperar();
+  assert.ok(jemc.estado.areas.pfa.moral < moral0, "la PFA recibió menos de lo pedido: baja la moral");
+  await assert.rejects(pres.votarLey(id), /ya no se puede votar/);
+});
+
+test("v3: obra: licitación, adjudicación, avance, inauguración con impacto provincial", async () => {
+  const { jemc, pres } = await armar();
+  await cargarIndicadores(pres);
+  await pres.proponer({ titulo: "Licitación", dominio: "infraestructura", efectos: [{ tipo: "doc", col: "obras", id: "obra-1", op: "crear", datos: { nombre: "Hospital Regional", tipo: "Hospital", provincia: "Salta", provinciaId: "salta", estado: "En licitación", ofertas: [{ id: "of-0", empresa: "Constructora Andina S.A.", costo: 100, plazo: 2, riesgo: "Bajo" }] } }] });
+  await esperar();
+  await pres.proponer({ titulo: "Adjudicar", dominio: "infraestructura", efectos: [{ tipo: "doc", col: "obras", id: "obra-1", op: "editar", cambios: { estado: "En ejecución", empresa: "Constructora Andina S.A.", costo: 100, plazo: 2, riesgo: "Bajo", avance: 0 } }] });
+  await esperar();
+  await jemc.avanzarMes(); await esperar();
+  assert.ok(pres.obras[0].avance > 20 && pres.obras[0].avance < 100);
+  for (let i = 0; i < 4 && pres.obras[0].estado !== "Terminada"; i++) { await jemc.avanzarMes(); await esperar(); }
+  assert.equal(pres.obras[0].estado, "Terminada");
+  const ap0 = pres.estado.gobierno.opinionPublica.aprobacion;
+  await pres.proponer({ titulo: "Inaugurar", dominio: "infraestructura", efectos: [
+    { tipo: "doc", col: "obras", id: "obra-1", op: "editar", cambios: { estado: "Inaugurada" } },
+    { tipo: "simples", efectos: { opinion: 1.5, prov: 5 }, provinciaId: "salta" },
+  ] });
+  await esperar();
+  assert.equal(pres.estado.gobierno.opinionPublica.aprobacion, Math.round((ap0 + 1.5) * 10) / 10);
+  assert.ok(pres.estado.provincias.find((p) => p.id === "salta").ajusteAprobacion >= 5);
+});
+
+test("v3: condecoración por decreto presidencial", async () => {
+  const { jemc, pres } = await armar();
+  await jemc.proponer({ titulo: "Alta", dominio: "pfa", efectos: [alta("pfa-1", "Héroe", "Sargento", "Operador táctico")] });
+  await esperar();
+  const pedidoJefe = await jemc.proponer({ titulo: "Condecorar", dominio: "decretos", efectos: [{ tipo: "personal", op: "condecorar", inst: "pfa", division: "pfa-1", id: "pol-Héroe", nombre: "Héroe", medalla: "Medalla al Valor" }] });
+  assert.equal(pedidoJefe.decide, "presidente");
+  await pres.decidir(pedidoJefe.id, "aprobar");
+  await esperar();
+  assert.equal(policias(jemc, "pfa-1")[0].condecoraciones[0].medalla, "Medalla al Valor");
+});
+
+test("v3: auditoría ordenada por el Presidente termina a los dos meses", async () => {
+  const { jemc, pres } = await armar();
+  await pres.proponer({ titulo: "Auditoría", dominio: "politica", efectos: [{ tipo: "doc", col: "auditorias", id: "aud-1", op: "crear", datos: { area: "fadea", areaNombre: "FAdeA", motivo: "Control de gastos", estado: "En curso", meses: 0 } }] });
+  await esperar();
+  await jemc.avanzarMes(); await esperar();
+  assert.equal(pres.auditorias[0].estado, "En curso");
+  await jemc.avanzarMes(); await esperar();
+  assert.equal(pres.auditorias[0].estado, "Finalizada");
+  assert.ok(["Sin observaciones", "Observaciones menores", "Irregularidades graves"].includes(pres.auditorias[0].resultado));
+});
+
+// ---------- Banco Central, ARCA, cuentas públicas y carga inicial ----------
+test("carga inicial: cualquiera carga datos vacíos; después decide el Presidente", async () => {
+  const { jemc, pres } = await armar();
+  const a = await jemc.proponer({ titulo: "Inflación inicial", dominio: "carga_inicial", efectos: [{ tipo: "indicador", clave: "inflacion", valor: 25 }] });
+  assert.equal(a.decide, "jemc");
+  assert.equal(a.estado, EP.aprobada);
+  await esperar();
+  const b = await jemc.proponer({ titulo: "Cambio", dominio: "carga_inicial", efectos: [{ tipo: "indicador", clave: "inflacion", valor: 20 }] });
+  assert.equal(b.decide, "presidente");
+  const c = await jemc.proponer({ titulo: "Dólar", dominio: "carga_inicial", efectos: [{ tipo: "dato", ruta: "bcra.dolar", valor: 1500 }] });
+  assert.equal(c.decide, "jemc");
+  const d = await jemc.proponer({ titulo: "Córdoba", dominio: "carga_inicial", efectos: [{ tipo: "lista", ruta: "provincias", op: "editar", id: "cordoba", cambios: { alineamiento: "Aliado" } }] });
+  assert.equal(d.decide, "jemc");
+  await esperar();
+  assert.equal(pres.estado.bcra.dolar, 1500);
+  assert.equal(pres.estado.provincias.find((p) => p.id === "cordoba").alineamiento, "Aliado");
+  // Las áreas del Jefe del Estado Mayor no cambian: el presupuesto propuesto sigue siendo del Presidente.
+  const e = await jemc.proponer({ titulo: "x", dominio: "economia", efectos: [{ tipo: "dato", ruta: "presupuesto.borrador.obras", valor: 1 }] });
+  assert.equal(e.decide, "presidente");
+});
+
+test("ARCA: alícuota cargada solo cambia por ley; la reforma sancionada ajusta la recaudación", async () => {
+  const { jemc, pres } = await armar();
+  await jemc.proponer({ titulo: "IVA", dominio: "carga_inicial", efectos: [{ tipo: "dato", ruta: "arca.alicuotas.iva", valor: 21 }] });
+  await pres.proponer({ titulo: "Recaudación", dominio: "carga_inicial", efectos: [{ tipo: "indicador", clave: "recaudacion", valor: 100000 }] });
+  await esperar();
+  await assert.rejects(pres.proponer({ titulo: "IVA directo", dominio: "economia", efectos: [{ tipo: "dato", ruta: "arca.alicuotas.iva", valor: 19 }] }), /ley del Congreso/);
+  await pres.proponer({ titulo: "Reforma", dominio: "politica", efectos: [{ tipo: "doc", col: "leyes", id: "ley-iva", op: "crear", datos: { tipo: "impuestos", titulo: "Baja del IVA", alicuotas: { iva: 19 }, origen: "Poder Ejecutivo", estado: "Presentado", negociaciones: [] } }] });
+  await esperar();
+  assert.equal((await pres.votarLey("ley-iva")).estado, "Media sanción");
+  assert.equal((await pres.votarLey("ley-iva")).estado, "Sancionada");
+  await esperar();
+  assert.equal(jemc.estado.arca.alicuotas.iva, 19);
+  assert.equal(jemc.estado.indicadores.recaudacion.valor, 95000); // -2 puntos × 2,5%
+});
+
+test("cuentas públicas: el historial registra ingreso, gasto y resultado mensual", async () => {
+  const { jemc, pres } = await armar();
+  await pres.proponer({ titulo: "Recaudación", dominio: "carga_inicial", efectos: [{ tipo: "indicador", clave: "recaudacion", valor: 120000 }] });
+  await pres.proponer({ titulo: "Borrador", dominio: "economia", efectos: [{ tipo: "dato", ruta: "presupuesto.borrador.otros", valor: 132000 }] });
+  await esperar();
+  const { id } = await pres.enviarPresupuesto(); await esperar();
+  await pres.votarLey(id); await pres.votarLey(id); await esperar();
+  await jemc.avanzarMes(); await esperar();
+  const h = jemc.estado.economia.historial.at(-1);
+  assert.equal(h.ingresoMensual, 10000);
+  assert.equal(h.gastoMensual, 11000);
+  assert.equal(h.resultado, -1000);
 });

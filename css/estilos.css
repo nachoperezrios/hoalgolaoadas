@@ -312,3 +312,20 @@ dialog.ventana .avisos { position: fixed; }
 .encabezado-inst p { color: var(--tinta-2); margin: 0.3rem 0 0; max-width: 70ch; }
 @media (max-width: 860px) { .encabezado-inst .escudo, .encabezado-inst .escudo svg, .encabezado-inst .escudo img { width: 64px; } }
 label.btn input[type="file"] { display: none; }
+
+/* ---------- Versión 3 ---------- */
+.nav-grupo { font-size: 0.72rem; font-weight: 700; color: var(--tinta-3); padding: 0.7rem 0.65rem 0.2rem; letter-spacing: 0.02em; }
+.nav-grupo:empty { padding: 0.4rem 0 0; border-top: 1px solid var(--linea); margin-top: 0.4rem; }
+@media (max-width: 860px) { .nav-grupo { display: none; } }
+
+.hemiciclo { display: flex; height: 16px; border-radius: 4px; overflow: hidden; margin-bottom: 0.7rem; gap: 2px; }
+.hemiciclo span { display: block; min-width: 2px; }
+.punto { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.45rem; vertical-align: middle; }
+
+.mapa-provincias { display: grid; grid-template-columns: repeat(6, minmax(44px, 64px)); grid-auto-rows: 52px; gap: 4px; justify-content: center; }
+.celda-mapa { border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-size: 0.78rem; line-height: 1.1; padding: 0; }
+.celda-mapa b { font-size: 0.8rem; }
+.celda-mapa span { font-size: 0.74rem; opacity: 0.95; }
+.celda-mapa:hover { outline: 2px solid var(--tinta); }
+
+.cabecera .fecha .btn { font-family: var(--sans); font-size: 0.82rem; font-weight: 600; vertical-align: middle; margin-left: 0.6rem; }

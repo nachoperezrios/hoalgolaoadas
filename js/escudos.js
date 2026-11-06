@@ -27,6 +27,22 @@ export const ESCUDOS = {
     <rect x="57" y="30" width="6" height="12" fill="#c9a54a"/>
     <text x="60" y="112" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="16" fill="#e8e2cf" letter-spacing="3">AFI</text>
   </svg>`,
+  bcra: `<svg viewBox="0 0 120 120" role="img" aria-label="Logo ficticio del Banco Central">
+    <circle cx="60" cy="60" r="56" fill="#16324f" stroke="#c9a54a" stroke-width="4"/>
+    <path d="M30 50 L60 32 L90 50 Z" fill="#c9a54a"/>
+    <rect x="32" y="52" width="56" height="4" fill="#c9a54a"/>
+    <g fill="#e8eef4"><rect x="36" y="58" width="6" height="22"/><rect x="48" y="58" width="6" height="22"/><rect x="60" y="58" width="6" height="22"/><rect x="72" y="58" width="6" height="22"/><rect x="82" y="58" width="4" height="22"/></g>
+    <rect x="30" y="82" width="60" height="5" fill="#c9a54a"/>
+    <text x="60" y="97" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="8.5" fill="#e8eef4" letter-spacing="1">BANCO</text>
+    <text x="60" y="106" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="8.5" fill="#e8eef4" letter-spacing="1">CENTRAL</text>
+  </svg>`,
+  arca: `<svg viewBox="0 0 120 120" role="img" aria-label="Logo ficticio de ARCA">
+    <rect x="6" y="6" width="108" height="108" rx="22" fill="#24543e"/>
+    <path d="M28 76 A32 32 0 0 1 92 76" fill="none" stroke="#e7d9a6" stroke-width="6" stroke-linecap="round"/>
+    <path d="M40 76 A20 20 0 0 1 80 76" fill="none" stroke="#9fd0b4" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="60" cy="76" r="5" fill="#e7d9a6"/>
+    <text x="60" y="101" text-anchor="middle" font-family="Georgia, serif" font-weight="700" font-size="15" fill="#e7d9a6" letter-spacing="3">ARCA</text>
+  </svg>`,
 };
 
 // Reduce una imagen subida a un tamaño razonable para guardarla en la partida.

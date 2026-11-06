@@ -11,14 +11,16 @@
 import { estadoInicial, REGISTRO_INICIAL } from "./datos-iniciales.js";
 import {
   ROLES, DOMINIOS, ESTADOS_PROPUESTA as EP, otroRol, rolQueDecide, aplicarEfectos, revertirEfectos,
-  resultadoVotacion, UMBRAL_GUERRA, generarCodigo, generarPin, generarId, describirEfecto, fechaLarga,
+  resultadoVotacion, UMBRAL_GUERRA, generarCodigo, generarPin, generarId, describirEfecto, fechaLarga, ALICUOTAS,
   aplicarPersonal, revertirPersonal, divisionesDeEfectos, INSTITUCIONES, nombreUnidad, instDeUnidad,
 } from "./reglas.js";
 import { migrarEstado, documentosIniciales, MAPA_DIVISIONES, VERSION_ACTUAL } from "./migracion.js";
 import { generarPlantel, generarNombresUnicos, funcionPara } from "./nombres.js";
+import { simularMes, votarCamara, avanzarMesFecha, AREAS_PRESUPUESTO, totalPresupuesto } from "./simulacion.js";
 import { construirInforme } from "./informes.js";
 
-const COLECCIONES = ["propuestas", "asuntos", "votaciones", "registro", "informes", "personal", "ordenes", "filtraciones", "inteligencia", "leyes"];
+const COLECCIONES = ["propuestas", "asuntos", "votaciones", "registro", "informes", "personal", "ordenes", "filtraciones", "inteligencia", "leyes",
+  "obras", "auditorias", "comunicados"];
 const ahora = () => new Date().toISOString();
 
 export class ErrorJuego extends Error {}
@@ -148,8 +150,8 @@ export class Juego {
         for (const d of docs) if (!datos[this.rutaDe(col, d.id)]) writes[this.rutaDe(col, d.id)] = d;
       }
       const [rr, e] = this.entrada(estado, {
-        tipo: "fecha", titulo: "La aplicación se actualizó a la versión 2",
-        detalle: `Se agregaron FAdeA, SIDE, AFI, Gobierno y opinión pública. Personal reubicado en los nuevos departamentos: ${movidos}.`,
+        tipo: "fecha", titulo: `La aplicación se actualizó a la versión ${VERSION_ACTUAL}`,
+        detalle: `Se agregaron economía, presupuesto, cuentas públicas, Banco Central, ARCA, obras, Congreso con legisladores y gabinete completo${(partida.version || 1) < 2 ? ", además de FAdeA, SIDE, AFI y Gobierno" : ""}. Personal reubicado: ${movidos}.`,
       });
       writes[rr] = { ...e, rol: "acuerdo" };
       return { writes };
@@ -210,6 +212,108 @@ export class Juego {
     return { estado: nuevo, aplicados };
   }
 
+  // ---------- turno mensual ----------
+  // Cualquiera de los dos puede avanzar el mes: la app calcula economía, presupuesto,
+  // obras, auditorías y opinión pública.
+  async avanzarMes(fechaEsperada) {
+    const enCurso = (col, f) => this[col].filter(f).map((d) => this.rutaDe(col, d.id));
+    const rutasObras = enCurso("obras", (o) => o.estado === "En ejecución");
+    const rutasAud = enCurso("auditorias", (a) => a.estado === "En curso");
+    return this.backend.transact([this.ruta, ...rutasObras, ...rutasAud], (datos) => {
+      const partida = datos[this.ruta];
+      exigir(!fechaEsperada || partida.estado.fechaJuego === fechaEsperada, "El otro jugador ya avanzó el mes");
+      const leer = (rutas) => rutas.map((r) => datos[r]).filter(Boolean);
+      const r = simularMes({ estado: partida.estado, obras: leer(rutasObras), auditorias: leer(rutasAud) });
+      const estado = r.estado;
+      estado.fechaJuego = avanzarMesFecha(partida.estado.fechaJuego);
+      const writes = { [this.ruta]: { ...partida, estado } };
+      for (const o of r.obras) writes[this.rutaDe("obras", o.id)] = o;
+      for (const a of r.auditorias) writes[this.rutaDe("auditorias", a.id)] = a;
+      const [rr, e] = this.entrada(estado, {
+        tipo: "fecha", titulo: `Avanzó el mes: ${fechaLarga(estado.fechaJuego)}`,
+        detalle: r.eventos.map((x) => x.texto).join(". ") || "Sin novedades",
+      });
+      writes[rr] = e;
+      return { writes, result: { eventos: r.eventos.length } };
+    });
+  }
+
+  // ---------- Congreso ----------
+  async enviarPresupuesto() {
+    exigir(this.rol === "presidente", "El presupuesto lo envía el Presidente");
+    const id = generarId("ley");
+    return this.backend.transact([this.ruta], (datos) => {
+      const partida = datos[this.ruta];
+      const estado = structuredClone(partida.estado);
+      const borrador = estado.presupuesto.borrador;
+      exigir(Object.values(borrador).some((v) => typeof v === "number" && v > 0), "Cargá al menos un monto en el presupuesto");
+      const anio = Number(estado.fechaJuego.slice(0, 4)) + 1;
+      const ley = {
+        id, tipo: "presupuesto", titulo: `Presupuesto ${anio}`, origen: "Poder Ejecutivo", estado: "Presentado",
+        descripcion: `Total: US$ ${totalPresupuesto(borrador).toLocaleString("es-AR")} millones`, presupuesto: borrador,
+        votosDiputados: { afirmativos: null, negativos: null, abstenciones: null }, votosSenado: { afirmativos: null, negativos: null, abstenciones: null },
+        negociaciones: [], notas: "", creada: ahora(), fechaJuego: estado.fechaJuego,
+      };
+      estado.presupuesto.leyId = id;
+      const writes = { [this.ruta]: { ...partida, estado }, [this.rutaDe("leyes", id)]: ley };
+      const [rr, e] = this.entrada(estado, { tipo: "propuesta", titulo: `Presupuesto ${anio} enviado al Congreso`, detalle: ley.descripcion });
+      writes[rr] = e;
+      return { writes, result: { id } };
+    });
+  }
+
+  // Lleva un proyecto a votación en la cámara que corresponde. Cada legislador vota
+  // según su bloque, la aprobación del gobierno, la de su provincia y lo negociado.
+  async votarLey(leyId) {
+    exigir(this.rol === "presidente", "Las leyes las lleva a votación el Presidente");
+    const rutaLey = this.rutaDe("leyes", leyId);
+    return this.backend.transact([this.ruta, rutaLey], (datos) => {
+      const partida = datos[this.ruta];
+      const ley = structuredClone(datos[rutaLey]);
+      exigir(ley, "El proyecto no existe");
+      const origenSenado = /senado/i.test(ley.origen || "");
+      let camara;
+      if (["Presentado", "En comisión"].includes(ley.estado)) camara = origenSenado ? "S" : "D";
+      else if (ley.estado === "Media sanción") camara = origenSenado ? "D" : "S";
+      else throw new ErrorJuego("Este proyecto ya no se puede votar");
+      const estado = structuredClone(partida.estado);
+      const res = votarCamara({ estado, camara, negociaciones: ley.negociaciones || [] });
+      const clave = camara === "D" ? "votosDiputados" : "votosSenado";
+      ley[clave] = { afirmativos: res.afirmativos, negativos: res.negativos, abstenciones: res.abstenciones, ausentes: res.ausentes };
+      ley.detalle = { ...(ley.detalle || {}), [camara]: res.detalle };
+      const primera = ["Presentado", "En comisión"].includes(ley.estado);
+      ley.estado = !res.aprobada ? "Rechazada" : primera ? "Media sanción" : "Sancionada";
+      ley.actualizado = estado.fechaJuego;
+      const nombreCamara = camara === "D" ? "Diputados" : "el Senado";
+      const writes = { [rutaLey]: ley };
+      let titular = `${ley.titulo}: ${res.aprobada ? (primera ? "media sanción en" : "es ley tras pasar por") : "rechazado en"} ${nombreCamara}`;
+      let bajada = `${res.afirmativos} votos a favor, ${res.negativos} en contra y ${res.abstenciones} abstenciones.${res.quorum ? "" : " No hubo quórum."}`;
+      if (ley.tipo === "presupuesto") {
+        if (ley.estado === "Sancionada") {
+          estado.presupuesto.vigente = ley.presupuesto;
+          if (typeof ley.presupuesto.fadea === "number") estado.fadea.presupuestoAnual = ley.presupuesto.fadea;
+          bajada += " Rige el nuevo reparto de fondos.";
+        } else if (ley.estado === "Rechazada") bajada += " Se prorroga el presupuesto anterior.";
+      }
+      // Reforma tributaria sancionada: rigen las nuevas alícuotas y la recaudación se ajusta.
+      if (ley.tipo === "impuestos" && ley.estado === "Sancionada") {
+        let variacion = 0;
+        for (const [k, nuevo] of Object.entries(ley.alicuotas || {})) {
+          const antes = estado.arca.alicuotas[k];
+          if (typeof nuevo === "number" && typeof antes === "number") variacion += (nuevo - antes) * (ALICUOTAS[k]?.peso || 0);
+          if (typeof nuevo === "number") estado.arca.alicuotas[k] = nuevo;
+        }
+        const rec = estado.indicadores.recaudacion;
+        if (variacion && typeof rec.valor === "number") rec.valor = Math.max(0, Math.round(rec.valor * (1 + variacion / 100)));
+        bajada += " Rigen las nuevas alícuotas.";
+      }
+      writes[this.ruta] = { ...partida, estado };
+      const [rr, e] = this.entrada(estado, { tipo: "decision", titulo: titular, detalle: bajada });
+      writes[rr] = e;
+      return { writes, result: { estado: ley.estado, ...res } };
+    });
+  }
+
   _revertir(aplicados, estado, datos, writes) {
     const generales = aplicados.filter((e) => e.tipo !== "personal" && e.tipo !== "doc");
     const personal = aplicados.filter((e) => e.tipo === "personal");
@@ -261,7 +365,7 @@ export class Juego {
       const partida = datos[this.ruta];
       exigir(partida, "La partida no existe");
       const estado = partida.estado;
-      const decide = rolQueDecide(dominio, efectos, estado);
+      const decide = rolQueDecide(dominio, efectos, estado, this.rol);
       const prop = {
         id, tipo: "normal", titulo: titulo.trim().slice(0, 200), dominio, autor: this.rol, decide,
         descripcion, justificacion, efectos, efectosAplicados: [], asuntoId,
@@ -405,7 +509,7 @@ export class Juego {
       exigir(prop.autor === this.rol, "Solo el autor puede reenviarla");
       exigir(prop.estado === EP.devuelta, "Solo se reenvían propuestas devueltas");
       for (const k of ["titulo", "descripcion", "justificacion", "efectos", "voto", "costo"]) if (k in cambios) prop[k] = cambios[k];
-      if (prop.tipo === "normal") prop.decide = rolQueDecide(prop.dominio, prop.efectos, datos[this.ruta].estado);
+      if (prop.tipo === "normal") prop.decide = rolQueDecide(prop.dominio, prop.efectos, datos[this.ruta].estado, this.rol);
       prop.estado = EP.revision;
       prop.fecha = ahora();
       prop.historial.push(this.paso("reenvio", cambios.comentario || ""));

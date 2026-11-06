@@ -151,7 +151,7 @@ with sync_playwright() as p:
     jemc.select_option('#ventana [name="trascendio"]', "Sí")
     enviar(jemc)
     expect(pres.locator(".codigo")).to_contain_text("47%", timeout=10000)
-    expect(pres.locator(".panel").nth(1)).to_contain_text("Filtración: Planos del Zonda")
+    expect(pres.locator(".panel", has_text="Historial")).to_contain_text("Filtración: Planos del Zonda")
     ok("opinión pública: 52% cargado por el Presidente; la filtración que trascendió la bajó a 47%")
 
     # AT-1 en ATLAS con ficha cargable
@@ -176,12 +176,15 @@ with sync_playwright() as p:
     ir(jemc, "gobierno", "provincias")
     jemc.locator("tr", has_text="Córdoba").locator('[data-accion="item"]').last.click()
     jemc.select_option('#ventana [name="alineamiento"]', "Aliado")
-    expect(jemc.locator("#ventana [data-aviso-generico]")).to_contain_text("Le corresponde al Presidente")
+    expect(jemc.locator("#ventana [data-aviso-generico]")).to_contain_text("dentro de tus facultades")
     enviar(jemc)
-    decidir_primera(pres, "Provincias")
     ir(pres, "gobierno", "provincias")
-    expect(pres.locator("tr", has_text="Córdoba")).to_contain_text("Aliado")
-    ok(f"Gobierno: el Presidente nombró a {nombre_min} (nombre generado); el pedido del JEMC sobre Córdoba se aprobó")
+    expect(pres.locator("tr", has_text="Córdoba")).to_contain_text("Aliado", timeout=10000)
+    jemc.locator("tr", has_text="Córdoba").locator('[data-accion="item"]').last.click()
+    jemc.select_option('#ventana [name="alineamiento"]', "Opositor")
+    expect(jemc.locator("#ventana [data-aviso-generico]")).to_contain_text("Le corresponde al Presidente")
+    jemc.click('#ventana [data-accion="cerrar-ventana"]')
+    ok(f"Gobierno: el Presidente nombró a {nombre_min}; el Jefe cargó el dato vacío de Córdoba y un cambio posterior ya es del Presidente")
 
     # Nada sin poder cargarse en las vistas principales
     for v in ["situacion", "fadea", "pfa", "gobierno"]:
